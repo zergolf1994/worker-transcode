@@ -40,3 +40,17 @@ func TestTimelineSteps(t *testing.T) {
 		t.Fatalf("second step = %#v, want encode_360 at 55%%", steps[1])
 	}
 }
+
+func TestParseCodecUtilization(t *testing.T) {
+	output := `# gpu   sm   mem   enc   dec   jpg   ofa
+# Idx    %     %     %     %     %     %
+    0   12     4    67     3     -     -
+    1    8     2     -     -     -     -`
+	got := parseCodecUtilization(output)
+	if got[0].encoder != 67 || got[0].decoder != 3 {
+		t.Fatalf("GPU 0 utilization = %#v", got[0])
+	}
+	if got[1].encoder != 0 || got[1].decoder != 0 {
+		t.Fatalf("GPU 1 unsupported values must be zero: %#v", got[1])
+	}
+}

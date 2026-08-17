@@ -155,23 +155,57 @@ reboot
 หลัง reboot ตรวจว่า driver ทำงาน:
 
 ```bash
-nvidia-smi
 cat /proc/driver/nvidia/version
 ```
 
-ติดตั้ง NVENC/NVDEC user-space runtime ให้ตรงกับ branch ของ driver เช่น driver
-`580.173.02` ต้องใช้แพ็กเกจ branch `580`:
+ติดตั้ง `nvidia-smi` และ NVENC/NVDEC user-space runtime ให้ตรงกับ branch ของ
+driver เช่น driver `580.173.02` ต้องใช้แพ็กเกจ branch `580` โดยอ่าน branch จาก
+kernel module ก่อน เพราะเครื่องอาจยังไม่มีคำสั่ง `nvidia-smi`:
 
 ```bash
-DRIVER_BRANCH=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader \
-    | head -n 1 | cut -d. -f1 | tr -d '[:space:]')
+DRIVER_BRANCH=$(awk '/NVRM version:/ {
+    for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9]+\./) {
+            split($i, version, ".")
+            print version[1]
+            exit
+        }
+    }
+}' /proc/driver/nvidia/version)
+
+test -n "$DRIVER_BRANCH" || {
+    echo "Cannot detect NVIDIA driver branch"
+    exit 1
+}
 
 apt update
+
+if apt-cache show "nvidia-utils-${DRIVER_BRANCH}" >/dev/null 2>&1; then
+    NVIDIA_UTILS_PACKAGE="nvidia-utils-${DRIVER_BRANCH}"
+elif apt-cache show "nvidia-utils-${DRIVER_BRANCH}-server" >/dev/null 2>&1; then
+    NVIDIA_UTILS_PACKAGE="nvidia-utils-${DRIVER_BRANCH}-server"
+else
+    echo "No nvidia-utils package found for driver branch ${DRIVER_BRANCH}"
+    exit 1
+fi
+
 apt install -y \
+    "$NVIDIA_UTILS_PACKAGE" \
     "libnvidia-encode-${DRIVER_BRANCH}" \
     "libnvidia-decode-${DRIVER_BRANCH}"
 ldconfig
 ```
+
+ตรวจว่าคำสั่งถูกติดตั้งและมองเห็น GPU:
+
+```bash
+command -v nvidia-smi
+nvidia-smi
+```
+
+ถ้า `command -v nvidia-smi` ไม่แสดง path ห้ามข้ามขั้นตอนนี้ เพราะ FFmpeg อาจใช้
+NVENC ได้ แต่หน้า Transcode Monitor จะไม่สามารถอ่าน GPU, VRAM, NVENC และ NVDEC
+และจะแสดง `N/A`
 
 ตรวจว่า dynamic linker มองเห็น library ที่ FFmpeg ต้องใช้:
 
@@ -296,7 +330,7 @@ sudo ufw allow from YOUR_ADMIN_IP to any port 8886 proto tcp
 เปิด terminal แยกเพื่อตรวจ GPU:
 
 ```bash
-watch -n 1 nvidia-smi
+watch -n 1 "$(command -v nvidia-smi)"
 ```
 
 ตรวจ CPU, disk และ network:
@@ -362,6 +396,17 @@ journalctl -u worker-transcode@1 -n 100 --no-pager
 ```bash
 lsmod | grep nvidia
 journalctl -k | grep -iE 'nvidia|nouveau'
+```
+
+ถ้า driver โหลดอยู่ แต่พบ `nvidia-smi: command not found` ให้ติดตั้ง utilities
+branch เดียวกับ driver ตามขั้นตอนที่ 5 ตัวอย่างสำหรับ branch 580:
+
+```bash
+apt update
+apt install -y nvidia-utils-580 || apt install -y nvidia-utils-580-server
+command -v nvidia-smi
+nvidia-smi
+systemctl restart 'worker-transcode@*'
 ```
 
 จากนั้นลองติดตั้ง driver ใหม่และ reboot:

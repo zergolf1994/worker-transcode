@@ -62,30 +62,81 @@ func (s *metricSampler) sample() SystemMetrics {
 }
 
 func sampleGPUs() ([]GPUInfo, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name,utilization.gpu,utilization.encoder,utilization.decoder,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits")
-	out, err := cmd.Output()
+	// Keep the CSV query to fields supported across old GeForce and new data
+	// center cards. Asking for encoder/decoder utilization here makes the whole
+	// command fail on some driver/GPU combinations, so those are read via dmon.
+	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return []GPUInfo{}, "nvidia-smi unavailable"
+		message := strings.TrimSpace(string(out))
+		if message == "" {
+			message = err.Error()
+		}
+		return []GPUInfo{}, "nvidia-smi: " + message
 	}
 	reader := csv.NewReader(strings.NewReader(string(out)))
 	records, err := reader.ReadAll()
 	if err != nil {
 		return []GPUInfo{}, "invalid nvidia-smi output"
 	}
+	utilization := sampleCodecUtilization()
 	gpus := make([]GPUInfo, 0, len(records))
 	for _, row := range records {
-		if len(row) < 8 {
+		if len(row) < 7 {
 			continue
 		}
+		index := int(number(row[0]))
+		codec := utilization[index]
 		gpus = append(gpus, GPUInfo{
-			Name: strings.TrimSpace(row[0]), GPUPercent: number(row[1]), EncoderPercent: number(row[2]),
-			DecoderPercent: number(row[3]), MemoryUsed: int64(number(row[4])) * 1024 * 1024,
-			MemoryTotal: int64(number(row[5])) * 1024 * 1024, Temperature: number(row[6]), PowerWatts: number(row[7]),
+			Name: strings.TrimSpace(row[1]), GPUPercent: number(row[2]), EncoderPercent: codec.encoder,
+			DecoderPercent: codec.decoder, MemoryUsed: int64(number(row[3])) * 1024 * 1024,
+			MemoryTotal: int64(number(row[4])) * 1024 * 1024, Temperature: number(row[5]), PowerWatts: number(row[6]),
 		})
 	}
+	if len(gpus) == 0 {
+		return []GPUInfo{}, "nvidia-smi returned no GPU rows"
+	}
 	return gpus, ""
+}
+
+type codecUtilization struct {
+	encoder float64
+	decoder float64
+}
+
+// sampleCodecUtilization uses the legacy enc/dec columns documented for
+// GeForce cards. Unsupported engines are reported as '-' and become zero.
+func sampleCodecUtilization() map[int]codecUtilization {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "nvidia-smi", "dmon", "-s", "u", "-c", "1").CombinedOutput()
+	if err != nil {
+		return map[int]codecUtilization{}
+	}
+	return parseCodecUtilization(string(out))
+}
+
+func parseCodecUtilization(output string) map[int]codecUtilization {
+	result := make(map[int]codecUtilization)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		// dmon -s u: gpu, sm, mem, enc, dec, [jpg, ofa]
+		if len(fields) < 5 {
+			continue
+		}
+		index, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		result[index] = codecUtilization{encoder: number(fields[3]), decoder: number(fields[4])}
+	}
+	return result
 }
 
 func number(value string) float64 {
