@@ -292,7 +292,14 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 	audioBitrate := getAudioBitrate(shortSide)
 
 	// Build ffmpeg command
-	args := []string{"-y"}
+	args := []string{
+		"-y",
+		"-hide_banner",
+		"-loglevel", "error",
+		"-nostats",
+		"-stats_period", "0.5",
+		"-progress", "pipe:1",
+	}
 
 	// Use GPU hwaccel for decode — reduces CPU usage significantly
 	switch encoder {
@@ -338,7 +345,15 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 			log.Printf("⚠️  GPU encode failed, retrying with CPU (libx264)...")
 			detectedEncoder = EncoderCPU // force CPU for subsequent encodes
 
-			cpuArgs := []string{"-y", "-i", inputPath}
+			cpuArgs := []string{
+				"-y",
+				"-hide_banner",
+				"-loglevel", "error",
+				"-nostats",
+				"-stats_period", "0.5",
+				"-progress", "pipe:1",
+				"-i", inputPath,
+			}
 			cpuArgs = append(cpuArgs, getEncoderArgs(EncoderCPU, shortSide, srcBitrateKbps, srcShortSide)...)
 			cpuArgs = append(cpuArgs,
 				"-vf", scaleFilter,
@@ -392,8 +407,13 @@ func CheckFFprobe() error {
 	return nil
 }
 
-// runFFmpegWithProgress runs ffmpeg and parses stderr for progress
+// runFFmpegWithProgress consumes FFmpeg's machine-readable -progress output.
+// stderr is reserved for bounded error diagnostics.
 func runFFmpegWithProgress(cmd *exec.Cmd, totalDuration float64, onProgress func(percent int)) error {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to pipe ffmpeg progress: %w", err)
+	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("failed to pipe stderr: %w", err)
@@ -403,65 +423,57 @@ func runFFmpegWithProgress(cmd *exec.Cmd, totalDuration float64, onProgress func
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
-	lastPercent := -1
 	var lastLines []string
 	const maxLastLines = 10
 
-	scanner := bufio.NewScanner(stderr)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		for i, b := range data {
-			if b == '\r' || b == '\n' {
-				return i + 1, data[:i], nil
-			}
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	done := make(chan struct{})
+	progressDone := make(chan error, 1)
 	go func() {
-		defer close(done)
+		lastPercent := -1
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 		for scanner.Scan() {
-			line := scanner.Text()
-			if len(strings.TrimSpace(line)) == 0 {
+			key, value, ok := strings.Cut(scanner.Text(), "=")
+			if !ok || (key != "out_time_us" && key != "out_time_ms") {
 				continue
 			}
+			elapsedMicros, parseErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+			if parseErr != nil || elapsedMicros < 0 || totalDuration <= 0 {
+				continue
+			}
+			percent := int(float64(elapsedMicros) / (totalDuration * 1_000_000) * 100)
+			if percent > 99 {
+				percent = 99
+			}
+			if percent < 0 || percent == lastPercent {
+				continue
+			}
+			lastPercent = percent
+			if onProgress != nil {
+				onProgress(percent)
+			}
+		}
+		progressDone <- scanner.Err()
+	}()
 
+	stderrDone := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
 			lastLines = append(lastLines, line)
 			if len(lastLines) > maxLastLines {
 				lastLines = lastLines[1:]
 			}
-
-			if idx := strings.Index(line, "time="); idx >= 0 {
-				timeStr := line[idx+5:]
-				if spaceIdx := strings.IndexAny(timeStr, " \t"); spaceIdx > 0 {
-					timeStr = timeStr[:spaceIdx]
-				}
-
-				currentSec := parseTimeToSeconds(timeStr)
-				if currentSec > 0 && totalDuration > 0 {
-					percent := int(currentSec / totalDuration * 100)
-					if percent > 100 {
-						percent = 100
-					}
-					if percent >= lastPercent+1 {
-						lastPercent = percent
-						if onProgress != nil {
-							onProgress(percent)
-						}
-					}
-				}
-			}
 		}
+		stderrDone <- scanner.Err()
 	}()
 
-	<-done
+	progressErr := <-progressDone
+	stderrErr := <-stderrDone
 	waitErr := cmd.Wait()
 
 	if waitErr != nil {
@@ -475,26 +487,16 @@ func runFFmpegWithProgress(cmd *exec.Cmd, totalDuration float64, onProgress func
 		}
 		return fmt.Errorf("%w: %s", waitErr, stderrMsg)
 	}
-
+	if progressErr != nil {
+		return fmt.Errorf("read ffmpeg progress: %w", progressErr)
+	}
+	if stderrErr != nil {
+		return fmt.Errorf("read ffmpeg stderr: %w", stderrErr)
+	}
+	if onProgress != nil {
+		onProgress(100)
+	}
 	return nil
-}
-
-// parseTimeToSeconds converts "HH:MM:SS.xx" to seconds
-func parseTimeToSeconds(timeStr string) float64 {
-	if strings.HasPrefix(timeStr, "-") {
-		return 0
-	}
-
-	parts := strings.Split(timeStr, ":")
-	if len(parts) != 3 {
-		return 0
-	}
-
-	hours, _ := strconv.ParseFloat(parts[0], 64)
-	minutes, _ := strconv.ParseFloat(parts[1], 64)
-	seconds, _ := strconv.ParseFloat(parts[2], 64)
-
-	return hours*3600 + minutes*60 + seconds
 }
 
 // GetFileSize returns the file size in bytes

@@ -78,3 +78,17 @@ func pctLogger64(slug, step string) func(done, total int64) {
 		}
 	}
 }
+
+// pctLogger returns an encode-progress callback that logs every 1%.
+func pctLogger(slug, step string) func(percent int) {
+	nextMilestone := 0
+	return func(percent int) {
+		if percent > 100 {
+			percent = 100
+		}
+		for nextMilestone <= percent && nextMilestone <= 100 {
+			utils.LogProgress("📊 [%s] %s: %d%%", slug, step, nextMilestone)
+			nextMilestone++
+		}
+	}
+}

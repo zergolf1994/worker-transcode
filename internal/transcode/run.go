@@ -217,8 +217,10 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 			utils.LogMain("🎬 [%s] Encoding %sp (%dx%d)...", slug, res, targetW, targetH)
 
 			write := stepThrottle(5)
+			logEncodeProgress := pctLogger(slug, encodeStep)
 			err := transcoder.EncodeResolution(ctx, originalPath, outputPath, targetW, targetH,
 				videoInfo.DurationF, videoInfo.VideoBitrate, int(shortSide), func(percent int) {
+					logEncodeProgress(percent)
 					if write(float64(percent)) {
 						updateTimelineStep(ctx, job.ID, encodeStep, float64(percent))
 						// encode กิน 70% ของช่วง res นี้ upload อีก 30%
