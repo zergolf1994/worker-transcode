@@ -2,6 +2,8 @@ package models
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/zergolf1994/goose"
@@ -54,6 +56,7 @@ type Storage struct {
 	Local       *StorageLocalConfig `bson:"local,omitempty" json:"local,omitempty"`
 	S3          *StorageS3Config    `bson:"s3,omitempty" json:"s3,omitempty"`
 	PublicURL   *string             `bson:"publicUrl,omitempty" json:"publicUrl,omitempty"`
+	OriginURL   *string             `bson:"originUrl,omitempty" json:"originUrl,omitempty"`
 	Accepts     []string            `bson:"accepts" json:"accepts"` // upload, video, image, other
 	HeartbeatAt *time.Time          `bson:"heartbeatAt,omitempty" json:"heartbeatAt,omitempty"`
 	Capacity    *StorageCapacity    `bson:"capacity,omitempty" json:"capacity,omitempty"`
@@ -111,4 +114,36 @@ func (s *Storage) GetHostPort() string {
 		return fmt.Sprintf("%s:%d", host, port)
 	}
 	return host + ":8888"
+}
+
+// GetOriginObjectURL resolves a permanent S3 object's HTTP origin URL.
+// originUrl may be a bare hostname or include a base path.
+func (s *Storage) GetOriginObjectURL(fileID, fileName string) (string, error) {
+	return s.GetOriginObjectPathURL(strings.Trim(fileID, "/") + "/" + strings.Trim(fileName, "/"))
+}
+
+// GetOriginObjectPathURL resolves an already persisted S3 object key.
+func (s *Storage) GetOriginObjectPathURL(objectPath string) (string, error) {
+	if s.Type != enums.StorageTypeS3 || s.OriginURL == nil {
+		return "", fmt.Errorf("S3 storage has no originUrl")
+	}
+	raw := strings.TrimSpace(*s.OriginURL)
+	if raw == "" {
+		return "", fmt.Errorf("S3 storage has no originUrl")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	origin, err := url.Parse(raw)
+	if err != nil || origin.Host == "" || (origin.Scheme != "http" && origin.Scheme != "https") {
+		return "", fmt.Errorf("invalid S3 originUrl")
+	}
+	if origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" {
+		return "", fmt.Errorf("originUrl must not contain credentials, query, or fragment")
+	}
+	objectPath = strings.Trim(strings.TrimSpace(objectPath), "/")
+	if objectPath == "" {
+		return "", fmt.Errorf("origin object path is incomplete")
+	}
+	return url.JoinPath(origin.String(), objectPath)
 }

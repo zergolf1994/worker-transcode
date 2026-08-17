@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"worker-transcode/internal/cache"
 	"worker-transcode/internal/config"
-	"worker-transcode/internal/core/logger"
 	"worker-transcode/internal/core/utils"
 	"worker-transcode/internal/db/database"
 	"worker-transcode/internal/queue"
@@ -22,6 +22,7 @@ var version = "dev"
 
 func main() {
 	config.Load()
+	cache.Init(config.AppConfig.RedisURL)
 	workerID := utils.GenerateWorkerID()
 	log.Printf("🚀 Starting Worker Transcode %s [Worker: %s]", version, workerID)
 
@@ -38,15 +39,6 @@ func main() {
 		log.Printf("❌ %v", err)
 		time.Sleep(5 * time.Second)
 		os.Exit(1)
-	}
-
-	// ── Rotating file logger ──────────────────────────────────
-	logCloser, err := logger.Init(config.AppConfig.LogPath)
-	if err != nil {
-		log.Printf("⚠️ File logging disabled: %v", err)
-	} else {
-		defer logCloser.Close()
-		log.Printf("📝 Logging to: %s", config.AppConfig.LogPath)
 	}
 
 	// ── MongoDB ───────────────────────────────────────────────
@@ -67,6 +59,9 @@ func main() {
 		defer close(hbDone)
 		queue.StartHeartbeat(ctx, workerID)
 	}()
+	queue.ClaimGate = func(ctx context.Context) string {
+		return queue.WorkerClaimGate(ctx, workerID)
+	}
 
 	// ── Job loop (blocking จนโดน SIGINT/SIGTERM) ──────────────
 	// shutdown ระหว่างทำงาน → loop จะ Release งานคืนคิวให้เอง

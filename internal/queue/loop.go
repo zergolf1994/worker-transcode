@@ -48,7 +48,7 @@ func RunLoop(ctx context.Context, workerID string, handler JobHandler) {
 		log.Printf("⚠️ ResumeOwn failed: %v", err)
 	} else if job != nil {
 		log.Printf("♻️ Resuming interrupted job %s (file=%s)", job.ID, strPtr(job.FileID))
-		runJob(ctx, job, handler)
+		runJob(ctx, workerID, job, handler)
 	}
 
 	for {
@@ -99,7 +99,7 @@ func RunLoop(ctx context.Context, workerID string, handler JobHandler) {
 			continue
 		}
 
-		runJob(ctx, job, handler)
+		runJob(ctx, workerID, job, handler)
 		// no sleep — if there's another pending job, take it right away
 	}
 }
@@ -131,9 +131,12 @@ func watchCancel(jobCtx context.Context, cancelJob context.CancelCauseFunc, jobI
 }
 
 // runJob executes one job and settles its final status.
-func runJob(ctx context.Context, job *models.VideoProcess, handler JobHandler) {
+func runJob(ctx context.Context, workerID string, job *models.VideoProcess, handler JobHandler) {
 	log.Printf("▶️ Job %s started (file=%s, slug=%s)", job.ID, strPtr(job.FileID), strPtr(job.Slug))
 	start := time.Now()
+
+	SetWorkerStatus(workerID, enums.WorkerStatusBusy, 1)
+	defer SetWorkerStatus(workerID, enums.WorkerStatusIdle, 0)
 
 	// per-job ctx: ตายได้ 2 ทาง — parent (shutdown) หรือ watcher (admin cancel)
 	// แยกเหตุด้วย context.Cause ตอน settle

@@ -19,7 +19,9 @@ type Config struct {
 	StorageId   string
 	StoragePath string
 
-	LogPath string // Path to rotating log file (env: LOG_PATH)
+	// Optional: invalidate content-node/player-node caches after direct media
+	// creation. RADIS_URL remains supported for legacy deployments.
+	RedisURL string
 }
 
 // Load reads configuration from environment variables (and .env file).
@@ -31,7 +33,7 @@ func Load() {
 		MongoURI:    getEnv("DATABASE_URL", "mongodb://localhost:27017"),
 		StorageId:   getEnv("STORAGE_ID", ""),
 		StoragePath: getEnv("STORAGE_PATH", ""),
-		LogPath:     getEnv("LOG_PATH", "logs/worker-transcode.log"),
+		RedisURL:    getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
 	}
 }
 

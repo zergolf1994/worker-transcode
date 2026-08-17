@@ -3,10 +3,10 @@ package transcode
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"worker-transcode/internal/core/enums"
+	"worker-transcode/internal/core/utils"
 	"worker-transcode/internal/db/models"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -72,7 +72,7 @@ func pctLogger64(slug, step string) func(done, total int64) {
 		}
 		pct := float64(done) / float64(total) * 100
 		if pct-lastPct >= 10 || pct >= 100 {
-			log.Printf("📊 [%s] %s: %.1f%% (%.2f / %.2f MB)", slug, step, pct,
+			utils.LogProgress("📊 [%s] %s: %.1f%% (%.2f / %.2f MB)", slug, step, pct,
 				float64(done)/1024/1024, float64(total)/1024/1024)
 			lastPct = pct
 		}

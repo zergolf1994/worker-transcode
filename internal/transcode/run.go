@@ -23,10 +23,10 @@ import (
 
 // ─── Transcode pipeline ──────────────────────────────────────
 //
-// One job = one file: โหลด original จาก storage-node (HTTP) → probe →
+// One job = one file: โหลด original จาก local storage-node หรือ S3 origin → probe →
 // encode ทุก resolution ที่ต่ำกว่าต้นฉบับ (360 เสมอ, 480/720/1080 ตาม
-// short side, YouTube-style 95% tolerance) → อัพ S3 temp + สร้าง ingest
-// processed (key มีวันที่) → worker-transfer ติดตั้ง + สร้าง media เอง
+// short side, YouTube-style 95% tolerance) → permanent S3 + media/clone
+// ทันที; ถ้าไม่มี permanent S3 จึง fallback ไป Temp/worker-transfer
 //
 // จบงาน: file.metadata.highest = resolution สูงสุด (marker ให้ enqueuer
 // ไม่หยิบซ้ำ) + กระจายไป cloned files
@@ -98,16 +98,25 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		os.Remove(originalPath)
 		startStep(ctx, job.ID, "download")
 
-		hostPort := sourceStorage.GetHostPort()
-		if hostPort == "" {
-			return fmt.Errorf("download: source storage has no host")
+		var sourceURL string
+		if sourceStorage.Type == enums.StorageTypeS3 {
+			sourceURL, err = sourceStorage.GetOriginObjectPathURL(originalMedia.ObjectPath())
+			if err != nil {
+				return fmt.Errorf("download: resolve S3 origin: %w", err)
+			}
+		} else {
+			hostPort := sourceStorage.GetHostPort()
+			if hostPort == "" {
+				return fmt.Errorf("download: source storage has no host")
+			}
+			sourceURL = fmt.Sprintf("http://%s/%s.mp4", hostPort, originalMedia.Slug)
 		}
-		url := fmt.Sprintf("http://%s/%s.mp4", hostPort, originalMedia.Slug)
-		utils.LogMain("📥 [%s] Downloading %s", slug, url)
+		utils.LogMain("📥 [%s] Downloading %s", slug, sourceURL)
 
 		write := stepThrottle(5)
-		if err := downloader.DownloadURL(ctx, url, originalPath, func(done, total int64) {
-			pctLogger64(slug, "download")(done, total)
+		logProgress := pctLogger64(slug, "download")
+		if err := downloader.DownloadURL(ctx, sourceURL, originalPath, func(done, total int64) {
+			logProgress(done, total)
 			if total > 0 {
 				pct := float64(done) / float64(total) * 100
 				if write(pct) {
@@ -160,10 +169,26 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 	}
 	models.VideoProcessModel.UpdateByID(ctx, job.ID, bson.M{"$set": timelineInit})
 
-	s3Storage, err := resolveS3TempStorage(ctx)
-	if err != nil {
-		// ไม่มี S3 temp = ปัญหาสภาพแวดล้อม ไม่ใช่ความผิดของงาน — คืนคิว
-		return fmt.Errorf("%v: %w", err, queue.ErrJobRequeue)
+	// Prefer durable S3 and create playable media immediately. Temp/transfer is
+	// retained as a fallback when no permanent S3 is available or its upload
+	// fails temporarily.
+	permanentS3, _ := resolveS3VideoStorage(ctx)
+	var tempS3 *models.Storage
+	resolveTemp := func() (*models.Storage, error) {
+		if tempS3 != nil {
+			return tempS3, nil
+		}
+		storage, resolveErr := resolveS3TempStorage(ctx)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		tempS3 = storage
+		return tempS3, nil
+	}
+	if permanentS3 == nil {
+		if _, err := resolveTemp(); err != nil {
+			return fmt.Errorf("no permanent S3 or S3 temp available: %v: %w", err, queue.ErrJobRequeue)
+		}
 	}
 
 	// ─── STEP 4: ENCODE + UPLOAD ต่อ resolution ───────────────
@@ -210,17 +235,14 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 			utils.LogMain("✅ [%s] Encoded %sp", slug, res)
 		}
 
-		// ── upload → S3 temp + ingest ──
+		// ── upload → permanent S3 media; fallback S3 temp + ingest ──
 		uploadStep := fmt.Sprintf("upload_%s", res)
 		startStep(ctx, job.ID, uploadStep)
 
-		// key แบบมีวันที่ เหมือน worker-download ({date}/{fileId}_{fileName})
-		objectKey := fmt.Sprintf("%s/%s_%s", time.Now().Format("2006-01-02"), fileID, fileName)
-		utils.LogMain("📤 [%s] Uploading %s → %s", slug, fileName, objectKey)
-
 		writeUp := stepThrottle(5)
-		if err := uploader.UploadToS3(ctx, s3Storage, outputPath, objectKey, func(done, total int64) {
-			pctLogger64(slug, uploadStep)(done, total)
+		logProgress := pctLogger64(slug, uploadStep)
+		onUploadProgress := func(done, total int64) {
+			logProgress(done, total)
 			if total > 0 {
 				pct := float64(done) / float64(total) * 100
 				if writeUp(pct) {
@@ -228,13 +250,47 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 					updateOverallPercent(ctx, job.ID, base+perRes*0.7+pct/100*perRes*0.3)
 				}
 			}
-		}); err != nil {
-			return fmt.Errorf("upload %s: %w", fileName, err)
 		}
 
 		size := transcoder.GetFileSize(outputPath)
-		if err := createTranscodeIngest(ctx, fileID, s3Storage, fileName, objectKey, size); err != nil {
-			return fmt.Errorf("create ingest %s: %w", fileName, err)
+		installedDirect := false
+		if permanentS3 != nil {
+			objectKey := fmt.Sprintf("%s/%s", fileID, fileName)
+			utils.LogMain("📤 [%s] Uploading %s → permanent S3 %s", slug, fileName, permanentS3.Name)
+			if uploadErr := uploader.UploadToS3(ctx, permanentS3, outputPath, objectKey, onUploadProgress); uploadErr != nil {
+				if cause := context.Cause(ctx); cause != nil {
+					return cause
+				}
+				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp", slug, uploadErr)
+				permanentS3 = nil // avoid retrying the same unhealthy destination for every resolution
+			} else {
+				if err := createPermanentVideoMedia(
+					ctx, fileID, slug, res, fileName, objectKey, permanentS3,
+					size, targetW, targetH, videoInfo.DurationF,
+				); err != nil {
+					return fmt.Errorf("create permanent media %s: %w", fileName, err)
+				}
+				installedDirect = true
+
+				// Rendition นี้ playable แล้ว: ล้าง playlist ทันทีก่อนลบ
+				// local output และเริ่ม encode resolution ถัดไป
+				invalidatePlaylistCaches(ctx, fileID, slug)
+			}
+		}
+
+		if !installedDirect {
+			tempStorage, tempErr := resolveTemp()
+			if tempErr != nil {
+				return fmt.Errorf("no S3 temp fallback for %s: %v: %w", fileName, tempErr, queue.ErrJobRequeue)
+			}
+			objectKey := fmt.Sprintf("%s/%s_%s", time.Now().Format("2006-01-02"), fileID, fileName)
+			utils.LogMain("📤 [%s] Uploading %s → S3 temp %s", slug, fileName, tempStorage.Name)
+			if err := uploader.UploadToS3(ctx, tempStorage, outputPath, objectKey, onUploadProgress); err != nil {
+				return fmt.Errorf("upload %s to S3 temp: %w", fileName, err)
+			}
+			if err := createTranscodeIngest(ctx, fileID, tempStorage, fileName, objectKey, size); err != nil {
+				return fmt.Errorf("create ingest %s: %w", fileName, err)
+			}
 		}
 		completeStep(ctx, job.ID, uploadStep)
 
@@ -242,10 +298,18 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 			highest = resInt
 		}
 
-		// ลบ output ที่อัพเสร็จแล้ว — ประหยัดดิสก์ระหว่างทำ res ถัดไป
-		os.Remove(outputPath)
+		// ลบ output ทันทีหลัง upload + media/cache เสร็จ คืนพื้นที่ก่อน
+		// encode resolution ถัดไป; ถ้าลบไม่ได้ให้หยุดเพื่อกัน disk เต็ม
+		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove uploaded output %s: %w", fileName, err)
+		}
+		utils.LogMain("🧹 [%s] Removed local %s after upload", slug, fileName)
 		models.VideoProcessModel.UpdateByID(ctx, job.ID, bson.M{"$push": bson.M{"completed": res}})
-		utils.LogMain("✅ [%s] %sp done (ingest created — worker-transfer will install)", slug, res)
+		if installedDirect {
+			utils.LogMain("✅ [%s] %sp ready on permanent S3", slug, res)
+		} else {
+			utils.LogMain("✅ [%s] %sp done (ingest created — worker-transfer will install)", slug, res)
+		}
 	}
 
 	// ─── STEP 5: FINISH — ประทับ metadata.highest ─────────────

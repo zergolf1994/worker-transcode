@@ -60,7 +60,8 @@ func NewProcessLogger(slug string) *ProcessLogger {
 		return &ProcessLogger{}
 	}
 
-	// Redirect global logger → process file only (main log stays clean)
+	// Detailed job logs stay in the process file. Milestones and throttled
+	// progress use LogMain/LogProgress to also reach stdout.
 	log.SetOutput(f)
 
 	return &ProcessLogger{file: f}
@@ -79,12 +80,18 @@ func (pl *ProcessLogger) Printf(format string, v ...interface{}) {
 	log.Printf(format, v...)
 }
 
-// LogMain writes a key milestone to BOTH the main rotating log AND the current process file.
-// Use for summary events: start, encode, upload, end, error.
+// LogMain writes a key milestone to the current process log and stdout.
 func LogMain(format string, v ...interface{}) {
 	msg := fmt.Sprintf(format, v...)
-	log.Printf("%s", msg)                                                                      // → process file (current log output)
-	fmt.Fprintf(logger.GlobalWriter, "%s %s\n", time.Now().Format("2006/01/02 15:04:05"), msg) // → main rotating log
+	log.Printf("%s", msg)
+	fmt.Fprintf(logger.GlobalWriter, "%s %s\n", time.Now().Format("2006/01/02 15:04:05"), msg)
+}
+
+// LogProgress writes throttled progress to the current process log and stdout.
+func LogProgress(format string, v ...interface{}) {
+	msg := fmt.Sprintf(format, v...)
+	log.Printf("%s", msg)
+	fmt.Fprintf(logger.GlobalWriter, "%s %s\n", time.Now().Format("2006/01/02 15:04:05"), msg)
 }
 
 // ─── Old Log Cleanup ──────────────────────────────────────────

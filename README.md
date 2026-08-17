@@ -2,11 +2,12 @@
 
 Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) — แปลงวิดีโอเป็นหลาย resolution (360/480/720/1080) แล้วส่งเข้าท่อ ingest ให้ worker-transfer ติดตั้งลง storage
 
-> แทนที่ `server-transcode` เดิมที่ scan หาไฟล์เอง — ตัวนี้รับงานจากคิวอย่างเดียว **ไม่ผูก storage**: เครื่องไหนก็รันได้ (โหลด original ผ่าน HTTP จาก storage-node → encode → อัพ S3 temp)
+> แทนที่ `server-transcode` เดิมที่ scan หาไฟล์เอง — ตัวนี้รับงานจากคิวอย่างเดียว **ไม่ผูก storage**: เครื่องไหนก็รันได้ (โหลด original ผ่าน storage-node หรือ S3 `originUrl` → encode → permanent S3; fallback S3 temp)
 
 ## Features
 
 - **Pool กลาง** — claim งาน `transcode` จาก `video_process` ตัวไหนว่างก็หยิบ ไม่มี targetStorageId
+- **S3 native** — original บน S3 โหลดผ่าน `originUrl`; rendition อัพขึ้น permanent S3 และสร้าง Media/Clone ทันที
 - **Dynamic resolutions** — 360 เสมอ + 480/720/1080 ตาม short side ของต้นฉบับ (YouTube-style 95% tolerance เช่น 478px ก็ได้ 480p) ข้าม resolution ที่มี media/ingest อยู่แล้ว
 - **GPU auto-detect** — NVIDIA nvenc → AMD amf → Intel qsv → CPU (libx264) | encode fail บน GPU → fallback CPU อัตโนมัติ | ปิด GPU ได้ผ่าน setting `transcode_config.gpuEnabled`
 - **Dynamic bitrate capping** — cap ตาม bitrate ต้นฉบับ (สัดส่วน pixel² × 0.85) ไฟล์ output ไม่บวมเกินต้นฉบับ
@@ -22,7 +23,7 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 - **MongoDB** (vdohide platform database)
 - **vdohide-service** รันอยู่ (enqueuer `getTranscodePending` เติมคิว + reaper)
 - **ffmpeg + ffprobe** (install.sh ติดตั้งให้) — GPU ต้องมี driver + ffmpeg ที่มี nvenc
-- ไฟล์ต้อง `ready` แล้ว (original อยู่บน storage-node — โหลดผ่าน HTTP)
+- ไฟล์ต้อง `ready` แล้ว (Local ต้องเข้าถึง storage-node; S3 ต้องมี `originUrl`)
 
 ---
 
@@ -52,7 +53,7 @@ DATABASE_URL=mongodb+srv://user:pass@cluster.mongodb.net/platform
 
 # Optional
 WORKER_ID=transcode_myhost@1
-LOG_PATH=logs/worker-transcode.log
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ## Settings ใน DB (collection `settings`)
@@ -65,9 +66,9 @@ LOG_PATH=logs/worker-transcode.log
 
 ## Transcode Flow (1 job = 1 file)
 
-1. **download (10%)** — โหลด original จาก storage-node (`http://{host}/{mediaSlug}.mp4`) — cache ไว้ retry
+1. **download (10%)** — Local โหลดจาก storage-node; S3 โหลดจาก `https://{originUrl}/{fileId}/{fileName}` — cache ไว้ retry
 2. **probe** — ขนาด/ความยาว/bitrate → คำนวณ resolutions เป้าหมาย
-3. **encode_{res} + upload_{res} (85%)** — ทีละ resolution: ffmpeg → อัพ S3 temp (key มีวันที่ `{date}/{fileId}_file_{res}.mp4`) → สร้าง ingest `processed` → **worker-transfer เห็น ingest แล้วติดตั้ง + สร้าง media เอง** (partial ได้ — 360 เสร็จก่อนก็ดูได้ก่อน)
+3. **encode_{res} + upload_{res} (85%)** — ทีละ resolution: ffmpeg → permanent S3 (`{fileId}/file_{res}.mp4`) → Media/Clone → Redis/Cloudflare playlist purge → ลบ local output ทันที; ถ้าไม่มีหรืออัพไม่สำเร็จ จึง fallback S3 temp + ingest ให้ worker-transfer ติดตั้ง
 4. **finish (100%)** — `file.metadata.highest` + clones
 
 ```
@@ -88,7 +89,7 @@ enqueuer:transcode ──pending──▶ claim → download → encode ─┐
 | `files` | metadata.highest (marker จบงาน) |
 | `medias` | หา original + เช็ค resolution ที่มีแล้ว |
 | `ingests` | สร้าง ingest processed ให้ worker-transfer |
-| `storages` | storage-node ต้นทาง (HTTP), S3 temp ปลายทาง |
+| `storages` | Local storage-node/S3 origin ต้นทาง, permanent S3 หรือ S3 temp ปลายทาง |
 | `settings` | `transcode_config` |
 
 > ⚠ **Index ทั้งหมดเป็นของฝั่ง vdohide-service (mongoose)** — repo นี้ไม่สร้าง index เอง

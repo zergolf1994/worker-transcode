@@ -1,6 +1,8 @@
 package models
 
 import (
+	"path"
+	"strings"
 	"time"
 
 	"github.com/zergolf1994/goose"
@@ -66,3 +68,26 @@ type Media struct {
 
 // MediaModel is the goose model for the "medias" collection.
 var MediaModel = goose.NewModel[Media]("medias")
+
+// ObjectPath returns the durable object key. path is authoritative; legacy
+// clone records fall back to the physical owner kept in clonedFrom.
+func (m *Media) ObjectPath() string {
+	if m.Path != nil && strings.TrimSpace(*m.Path) != "" {
+		return strings.TrimLeft(strings.TrimSpace(*m.Path), "/")
+	}
+	ownerID := ""
+	if m.ClonedFrom != nil {
+		ownerID = strings.TrimSpace(*m.ClonedFrom)
+	}
+	if ownerID == "" && m.FileID != nil {
+		ownerID = strings.TrimSpace(*m.FileID)
+	}
+	fileName := ""
+	if m.FileName != nil {
+		fileName = strings.TrimSpace(*m.FileName)
+	}
+	if ownerID == "" || fileName == "" {
+		return ""
+	}
+	return path.Join(ownerID, fileName)
+}

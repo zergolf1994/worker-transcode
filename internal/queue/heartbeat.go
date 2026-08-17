@@ -59,27 +59,24 @@ func StartHeartbeat(ctx context.Context, workerID string) {
 
 		sys := gatherSystemInfo(config.AppConfig.StoragePath)
 
-		enable := true
 		if sys.DiskTotal > 0 {
 			diskPct := float64(sys.DiskUsed) / float64(sys.DiskTotal) * 100
 			if diskPct >= diskPauseThreshold {
 				status = enums.WorkerStatusPaused
-				enable = false
-				log.Printf("⚠️ Heartbeat: disk usage %.1f%% >= %.0f%% — enable=false", diskPct, diskPauseThreshold)
+				log.Printf("⚠️ Heartbeat: disk usage %.1f%% >= %.0f%% — paused", diskPct, diskPauseThreshold)
 			}
 		}
 
 		now := time.Now()
 		update := bson.M{
 			"$set": bson.M{
-				"hostname":    hostname,
-				"ip":          ip,
-				"pid":         pid,
-				"type":        workerType,
+				"hostname": hostname,
+				"ip":       ip,
+				"pid":      pid,
+				"type":     workerType,
 				// enqueuer จับคู่ slot กับ storage ปลายทางด้วย field นี้
 				"storageId":   config.AppConfig.StorageId,
 				"status":      status,
-				"enable":      enable,
 				"activeJobs":  activeJobs,
 				"maxJobs":     1, // 1 worker = 1 job at a time
 				"system":      sys,
@@ -88,6 +85,7 @@ func StartHeartbeat(ctx context.Context, workerID string) {
 			},
 			"$setOnInsert": bson.M{
 				"_id":       uuid.New().String(),
+				"enable":    true,
 				"createdAt": now,
 			},
 		}
@@ -113,6 +111,25 @@ func StartHeartbeat(ctx context.Context, workerID string) {
 	}
 }
 
+// SetWorkerStatus updates the dashboard immediately on job start/finish. It
+// never changes Admin-owned enable and does not overwrite a disk pause.
+func SetWorkerStatus(workerID, status string, activeJobs int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := models.WorkerModel.Col().UpdateOne(ctx,
+		bson.M{"workerId": workerID, "status": bson.M{"$ne": enums.WorkerStatusPaused}},
+		bson.M{"$set": bson.M{
+			"status":     status,
+			"activeJobs": activeJobs,
+			"updatedAt":  time.Now(),
+		}},
+	)
+	if err != nil {
+		log.Printf("⚠️ Failed to set worker status=%s: %v", status, err)
+	}
+}
+
 // markOffline flags the worker offline on graceful shutdown so the admin
 // sees it immediately instead of waiting for the heartbeat TTL to expire.
 func markOffline(workerID string) {
@@ -124,7 +141,6 @@ func markOffline(workerID string) {
 		bson.M{"workerId": workerID},
 		bson.M{"$set": bson.M{
 			"status":    enums.WorkerStatusOffline,
-			"enable":    false,
 			"updatedAt": now,
 		}},
 	)
@@ -133,6 +149,19 @@ func markOffline(workerID string) {
 	} else {
 		log.Printf("💤 Worker marked offline (workerId=%s)", workerID)
 	}
+}
+
+// WorkerClaimGate prevents a manually disabled worker from claiming new jobs.
+// Heartbeats only set enable when first creating the record, so Admin owns it.
+func WorkerClaimGate(ctx context.Context, workerID string) string {
+	worker, err := models.WorkerModel.FindOne(ctx, bson.M{"workerId": workerID})
+	if err != nil {
+		return "worker record unavailable"
+	}
+	if !worker.Enable {
+		return "worker disabled by admin"
+	}
+	return ""
 }
 
 // parseWorkerID splits "type_hostname@n" into worker type and hostname.
