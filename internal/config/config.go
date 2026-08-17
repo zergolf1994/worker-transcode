@@ -11,8 +11,10 @@ var AppConfig Config
 
 // Config represents the application configuration.
 type Config struct {
-	Port     string
-	MongoURI string
+	// DashboardPort is opened by worker instance @1 only. All instances write
+	// progress to MongoDB, so that single dashboard can display the whole host.
+	DashboardPort string
+	MongoURI      string
 
 	// transcode ไม่ผูก storage — สองตัวนี้ใช้แค่วัด disk ของเครื่อง
 	// (heartbeat system info + disk gate ของ job loop) ว่าง = ใช้ working dir
@@ -30,10 +32,11 @@ func Load() {
 	godotenv.Load()
 
 	AppConfig = Config{
-		MongoURI:    getEnv("DATABASE_URL", "mongodb://localhost:27017"),
-		StorageId:   getEnv("STORAGE_ID", ""),
-		StoragePath: getEnv("STORAGE_PATH", ""),
-		RedisURL:    getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
+		DashboardPort: getEnv("DASHBOARD_PORT", getEnv("PORT", "8886")),
+		MongoURI:      getEnv("DATABASE_URL", "mongodb://localhost:27017"),
+		StorageId:     getEnv("STORAGE_ID", ""),
+		StoragePath:   getEnv("STORAGE_PATH", ""),
+		RedisURL:      getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
 	}
 }
 

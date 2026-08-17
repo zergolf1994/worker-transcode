@@ -113,15 +113,14 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		}
 		utils.LogMain("📥 [%s] Downloading %s", slug, sourceURL)
 
-		write := stepThrottle(5)
+		write := stepThrottle(1)
 		logProgress := pctLogger64(slug, "download")
 		if err := downloader.DownloadURL(ctx, sourceURL, originalPath, func(done, total int64) {
 			logProgress(done, total)
 			if total > 0 {
 				pct := float64(done) / float64(total) * 100
 				if write(pct) {
-					updateTimelineStep(ctx, job.ID, "download", pct)
-					updateOverallPercent(ctx, job.ID, pct*0.10)
+					updateStepAndOverall(ctx, job.ID, "download", pct, pct*0.10)
 				}
 			}
 		}); err != nil {
@@ -207,49 +206,41 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		targetW, targetH := transcoder.GetScaleDimensions(videoInfo.Width, videoInfo.Height, shortTarget)
 		base := 10.0 + float64(idx)*perRes
 
-		// ── encode (ข้ามถ้าไฟล์ค้างจากรอบก่อนและขนาด > 0 — retry resume) ──
+		// ── encode (retry resume skips only a finalized, full-duration MP4) ──
 		encodeStep := fmt.Sprintf("encode_%s", res)
 		if info, statErr := os.Stat(outputPath); statErr == nil && info.Size() > 0 {
-			utils.LogMain("⏭️  [%s] %sp already encoded (retry resume) — skipping encode", slug, res)
-			completeStep(ctx, job.ID, encodeStep)
-		} else {
-			startStep(ctx, job.ID, encodeStep)
-			utils.LogMain("🎬 [%s] Encoding %sp (%dx%d)...", slug, res, targetW, targetH)
-
-			write := stepThrottle(5)
-			logEncodeProgress := pctLogger(slug, encodeStep)
-			err := transcoder.EncodeResolution(ctx, originalPath, outputPath, targetW, targetH,
-				videoInfo.DurationF, videoInfo.VideoBitrate, int(shortSide), func(percent int) {
-					logEncodeProgress(percent)
-					if write(float64(percent)) {
-						updateTimelineStep(ctx, job.ID, encodeStep, float64(percent))
-						// encode กิน 70% ของช่วง res นี้ upload อีก 30%
-						updateOverallPercent(ctx, job.ID, base+float64(percent)/100*perRes*0.7)
-					}
-				})
-			if err != nil {
-				if ctx.Err() != nil {
-					return context.Cause(ctx)
+			if validateErr := transcoder.ValidateEncodedOutput(outputPath, videoInfo.DurationF); validateErr == nil {
+				utils.LogMain("⏭️  [%s] %sp already encoded and verified (retry resume) — skipping encode", slug, res)
+				completeStep(ctx, job.ID, encodeStep)
+			} else {
+				utils.LogMain("⚠️  [%s] Removing incomplete %sp retry output: %v", slug, res, validateErr)
+				if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
+					return fmt.Errorf("remove incomplete %sp output: %w", res, removeErr)
 				}
-				return fmt.Errorf("encode %sp: %w", res, err)
+				if err := encodeResolution(ctx, job, slug, res, encodeStep, originalPath, outputPath,
+					targetW, targetH, videoInfo, int(shortSide), base, perRes); err != nil {
+					return err
+				}
 			}
-			completeStep(ctx, job.ID, encodeStep)
-			utils.LogMain("✅ [%s] Encoded %sp", slug, res)
+		} else {
+			if err := encodeResolution(ctx, job, slug, res, encodeStep, originalPath, outputPath,
+				targetW, targetH, videoInfo, int(shortSide), base, perRes); err != nil {
+				return err
+			}
 		}
 
 		// ── upload → permanent S3 media; fallback S3 temp + ingest ──
 		uploadStep := fmt.Sprintf("upload_%s", res)
 		startStep(ctx, job.ID, uploadStep)
 
-		writeUp := stepThrottle(5)
+		writeUp := stepThrottle(1)
 		logProgress := pctLogger64(slug, uploadStep)
 		onUploadProgress := func(done, total int64) {
 			logProgress(done, total)
 			if total > 0 {
 				pct := float64(done) / float64(total) * 100
 				if writeUp(pct) {
-					updateTimelineStep(ctx, job.ID, uploadStep, pct)
-					updateOverallPercent(ctx, job.ID, base+perRes*0.7+pct/100*perRes*0.3)
+					updateStepAndOverall(ctx, job.ID, uploadStep, pct, base+perRes*0.7+pct/100*perRes*0.3)
 				}
 			}
 		}
@@ -323,6 +314,34 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 
 	success = true
 	utils.LogMain("✅ [%s] TRANSCODE COMPLETE (%v)", slug, pending)
+	return nil
+}
+
+func encodeResolution(ctx context.Context, job *models.VideoProcess, slug, res, encodeStep,
+	originalPath, outputPath string, targetW, targetH int, videoInfo *transcoder.VideoInfo,
+	shortSide int, base, perRes float64,
+) error {
+	startStep(ctx, job.ID, encodeStep)
+	utils.LogMain("🎬 [%s] Encoding %sp (%dx%d)...", slug, res, targetW, targetH)
+
+	write := stepThrottle(1)
+	logEncodeProgress := pctLogger(slug, encodeStep)
+	err := transcoder.EncodeResolution(ctx, originalPath, outputPath, targetW, targetH,
+		videoInfo.DurationF, videoInfo.VideoBitrate, shortSide, func(percent int) {
+			logEncodeProgress(percent)
+			if write(float64(percent)) {
+				// encode กิน 70% ของช่วง res นี้ upload อีก 30%
+				updateStepAndOverall(ctx, job.ID, encodeStep, float64(percent), base+float64(percent)/100*perRes*0.7)
+			}
+		})
+	if err != nil {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return fmt.Errorf("encode %sp: %w", res, err)
+	}
+	completeStep(ctx, job.ID, encodeStep)
+	utils.LogMain("✅ [%s] Encoded %sp", slug, res)
 	return nil
 }
 

@@ -2,11 +2,40 @@ package transcoder
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 )
+
+// ValidateEncodedOutput verifies that a retry candidate is a finalized video,
+// not merely a non-empty MP4 that FFmpeg was still writing when the worker
+// stopped. A small duration tolerance covers normal container rounding.
+func ValidateEncodedOutput(filePath string, expectedDuration float64) error {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("stat output: %w", err)
+	}
+	if fileInfo.Size() <= 0 {
+		return fmt.Errorf("output is empty")
+	}
+
+	info, err := ProbeVideoInfo(filePath)
+	if err != nil {
+		return fmt.Errorf("ffprobe output: %w", err)
+	}
+	if info.DurationF <= 0 {
+		return fmt.Errorf("output has no readable duration")
+	}
+	if expectedDuration > 0 {
+		tolerance := math.Max(2, expectedDuration*0.01)
+		if math.Abs(info.DurationF-expectedDuration) > tolerance {
+			return fmt.Errorf("duration incomplete: got %.2fs, expected %.2fs (tolerance %.2fs)", info.DurationF, expectedDuration, tolerance)
+		}
+	}
+	return nil
+}
 
 // VideoInfo contains video metadata from ffprobe
 type VideoInfo struct {

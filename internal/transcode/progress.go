@@ -14,7 +14,8 @@ import (
 
 // ─── Progress writes ─────────────────────────────────────────
 // transcode เป็นงานยาว (encode เป็นสิบนาที–ชั่วโมง) — เขียน % ลง DB
-// แบบ throttle (ทุก ~5%) ให้หน้า admin เห็นความคืบหน้า ไม่ถล่ม Mongo
+// แบบ throttle (ทุก ~1%) ให้หน้า admin และ realtime monitor เห็นความคืบหน้า
+// ตรงกับ milestone ใน process log โดยจำกัดสูงสุดประมาณ 100 writes ต่อ step
 // steps เป็น dynamic ตาม resolution: download, encode_{res}, upload_{res}
 
 func startStep(ctx context.Context, processID, step string) {
@@ -35,10 +36,16 @@ func completeStep(ctx context.Context, processID, step string) {
 	}})
 }
 
-func updateTimelineStep(ctx context.Context, processID, step string, percent float64) {
+// updateStepAndOverall writes both progress values atomically. The realtime
+// monitor uses both fields, and one update per 1% avoids doubling Mongo writes.
+func updateStepAndOverall(ctx context.Context, processID, step string, stepPercent, overallPercent float64) {
+	if overallPercent > 100 {
+		overallPercent = 100
+	}
 	models.VideoProcessModel.UpdateByID(ctx, processID, bson.M{"$set": bson.M{
 		fmt.Sprintf("timeline.%s.status", step):  enums.StepStatusProcessing,
-		fmt.Sprintf("timeline.%s.percent", step): percent,
+		fmt.Sprintf("timeline.%s.percent", step): stepPercent,
+		"overallPercent":                         overallPercent,
 	}})
 }
 

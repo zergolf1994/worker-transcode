@@ -384,6 +384,9 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 	if info.Size() == 0 {
 		return fmt.Errorf("output file is empty")
 	}
+	if err := ValidateEncodedOutput(outputPath, totalDuration); err != nil {
+		return fmt.Errorf("output validation failed: %w", err)
+	}
 
 	log.Printf("✅ Encoded %s (%.2f MB) [%s]", outputPath, float64(info.Size())/1024/1024, encoder)
 	return nil

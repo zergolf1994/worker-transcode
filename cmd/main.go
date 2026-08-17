@@ -11,6 +11,7 @@ import (
 	"worker-transcode/internal/cache"
 	"worker-transcode/internal/config"
 	"worker-transcode/internal/core/utils"
+	"worker-transcode/internal/dashboard"
 	"worker-transcode/internal/db/database"
 	"worker-transcode/internal/queue"
 	"worker-transcode/internal/transcode"
@@ -24,6 +25,12 @@ func main() {
 	config.Load()
 	cache.Init(config.AppConfig.RedisURL)
 	workerID := utils.GenerateWorkerID()
+	releaseInstanceLock, err := utils.AcquireInstanceLock(workerID)
+	if err != nil {
+		log.Printf("❌ Worker %s refused to start: %v", workerID, err)
+		os.Exit(1)
+	}
+	defer releaseInstanceLock()
 	log.Printf("🚀 Starting Worker Transcode %s [Worker: %s]", version, workerID)
 
 	// transcode ไม่ผูก storage — เครื่องไหนก็รันได้ (input ผ่าน HTTP จาก
@@ -61,6 +68,14 @@ func main() {
 	}()
 	queue.ClaimGate = func(ctx context.Context) string {
 		return queue.WorkerClaimGate(ctx, workerID)
+	}
+
+	// systemd may run several transcode instances on one host. Instance @1
+	// alone owns :8886; it reads every sibling's active jobs from MongoDB.
+	if dashboard.ShouldStart(workerID) {
+		go dashboard.Start(ctx, config.AppConfig.DashboardPort, workerID, config.AppConfig.StoragePath)
+	} else {
+		log.Printf("📺 Dashboard is served by worker instance @1 on port %s", config.AppConfig.DashboardPort)
 	}
 
 	// ── Job loop (blocking จนโดน SIGINT/SIGTERM) ──────────────
