@@ -32,7 +32,8 @@ func workerGroup(workerID string) string {
 
 // Start serves the realtime dashboard and shuts down with the worker.
 func Start(ctx context.Context, port, workerID, storagePath string) {
-	hub := newHub(workerGroup(workerID), storagePath)
+	group := workerGroup(workerID)
+	hub := newHub(group, storagePath)
 	go hub.run(ctx)
 
 	mux := http.NewServeMux()
@@ -46,6 +47,7 @@ func Start(ctx context.Context, port, workerID, storagePath string) {
 		_, _ = w.Write(indexHTML)
 	})
 	mux.HandleFunc("/events", hub.serveEvents)
+	mux.HandleFunc("/logs/", serveProcessLog(group))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","service":"worker-transcode-dashboard"}`))

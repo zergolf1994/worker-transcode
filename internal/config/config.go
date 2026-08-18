@@ -41,7 +41,7 @@ func Load() {
 		StorageId:           getEnv("STORAGE_ID", ""),
 		StoragePath:         getEnv("STORAGE_PATH", ""),
 		RedisURL:            getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
-		S3UploadConcurrency: getIntEnv("S3_UPLOAD_CONCURRENCY", 3, 1, 8),
+		S3UploadConcurrency: getIntEnv("S3_UPLOAD_CONCURRENCY", 2, 1, 8),
 	}
 }
 

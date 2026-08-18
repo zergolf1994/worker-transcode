@@ -177,6 +177,7 @@ print_status "Creating .env file..."
 cat > "$APP_DIR/.env" <<EOF
 DATABASE_URL=$DATABASE_URL
 DASHBOARD_PORT=$DASHBOARD_PORT
+S3_UPLOAD_CONCURRENCY=2
 EOF
 
 # ─── Systemd service template ─────────────────────────────────

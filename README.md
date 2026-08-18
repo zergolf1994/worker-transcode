@@ -17,6 +17,7 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 - **Progress จริง** — เขียน % ลง DB แบบ throttle ทุก ~5% (download / encode_{res} / upload_{res}) — งาน encode ยาวเป็นชั่วโมง หน้า admin เห็นความคืบหน้า
 - **จบงาน** — อัปเดต `file.metadata.highest` เป็น resolution สูงสุด + กระจายไป cloned files (ป้ายคุณภาพให้ UI — enqueuer ตัดสิน "เคย transcode หรือยัง" จาก media/ingest จริง ไม่ใช่ field นี้)
 - **Log per job** — จบงาน → อัพ `logs/process/<slug>.log` ขึ้น S3 ที่ `logs/transcode/`
+- **Live process log** — กด `View log` ใน Dashboard เพื่ออ่าน log เฉพาะเมื่อเปิด (refresh ทุก 1 วินาที, สูงสุดท้ายไฟล์ 512 KiB)
 
 ## Requirements
 
@@ -54,6 +55,7 @@ DATABASE_URL=mongodb+srv://user:pass@cluster.mongodb.net/platform
 # Optional
 WORKER_ID=transcode_myhost@1
 REDIS_URL=redis://localhost:6379/0
+S3_UPLOAD_CONCURRENCY=2
 ```
 
 ## Settings ใน DB (collection `settings`)
