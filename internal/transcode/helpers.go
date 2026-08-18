@@ -211,6 +211,11 @@ func cloneMediaToClonedFiles(ctx context.Context, sourceFileID string, media mod
 	}
 }
 
+// Cache invalidation is intentionally disabled while content-node controls
+// playlist freshness through CDN TTLs. Set this to true to restore Redis and
+// Cloudflare invalidation without rebuilding the old call sites.
+const cacheInvalidationEnabled = false
+
 // invalidatePlaylistCaches is called once per transcode job after direct S3
 // media creation. Redis must be cleared before Cloudflare so the first MISS
 // cannot repopulate the CDN with a stale playlist.

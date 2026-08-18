@@ -255,7 +255,6 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 					return cause
 				}
 				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp", slug, uploadErr)
-				permanentS3 = nil // avoid retrying the same unhealthy destination for every resolution
 			} else {
 				if err := createPermanentVideoMedia(
 					ctx, fileID, slug, res, fileName, objectKey, permanentS3,
@@ -265,9 +264,11 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 				}
 				installedDirect = true
 
-				// Rendition นี้ playable แล้ว: ล้าง playlist ทันทีก่อนลบ
-				// local output และเริ่ม encode resolution ถัดไป
-				invalidatePlaylistCaches(ctx, fileID, slug)
+				// Cache invalidation is disabled; content-node/CDN TTL controls
+				// freshness. Flip cacheInvalidationEnabled to restore this call.
+				if cacheInvalidationEnabled {
+					invalidatePlaylistCaches(ctx, fileID, slug)
+				}
 			}
 		}
 

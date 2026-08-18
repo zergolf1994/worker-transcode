@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
@@ -24,6 +25,9 @@ type Config struct {
 	// Optional: invalidate content-node/player-node caches after direct media
 	// creation. RADIS_URL remains supported for legacy deployments.
 	RedisURL string
+
+	// Number of multipart S3 parts uploaded in parallel.
+	S3UploadConcurrency int
 }
 
 // Load reads configuration from environment variables (and .env file).
@@ -32,12 +36,27 @@ func Load() {
 	godotenv.Load()
 
 	AppConfig = Config{
-		DashboardPort: getEnv("DASHBOARD_PORT", getEnv("PORT", "8886")),
-		MongoURI:      getEnv("DATABASE_URL", "mongodb://localhost:27017"),
-		StorageId:     getEnv("STORAGE_ID", ""),
-		StoragePath:   getEnv("STORAGE_PATH", ""),
-		RedisURL:      getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
+		DashboardPort:       getEnv("DASHBOARD_PORT", getEnv("PORT", "8886")),
+		MongoURI:            getEnv("DATABASE_URL", "mongodb://localhost:27017"),
+		StorageId:           getEnv("STORAGE_ID", ""),
+		StoragePath:         getEnv("STORAGE_PATH", ""),
+		RedisURL:            getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
+		S3UploadConcurrency: getIntEnv("S3_UPLOAD_CONCURRENCY", 3, 1, 8),
 	}
+}
+
+func getIntEnv(key string, fallback, minValue, maxValue int) int {
+	value, err := strconv.Atoi(os.Getenv(key))
+	if err != nil {
+		return fallback
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func getEnv(key, fallback string) string {
