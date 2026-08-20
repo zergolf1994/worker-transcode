@@ -24,6 +24,11 @@ const (
 	EncoderNVENC = "h264_nvenc"
 	EncoderAMF   = "h264_amf"
 	EncoderQSV   = "h264_qsv"
+
+	// nginx-vod packages HLS into 4-second segments. Every rendition must
+	// expose an IDR at the same timestamps so ABR switches can start decoding
+	// immediately after changing quality.
+	hlsKeyframeIntervalSeconds = 4
 )
 
 var (
@@ -239,6 +244,8 @@ func getEncoderArgs(encoder string, shortSide int, srcBitrateKbps int64, srcShor
 			"-profile:v", "high",
 			"-spatial-aq", "1",
 			"-b_ref_mode", "middle",
+			"-no-scenecut", "1",
+			"-forced-idr", "1",
 		}
 	case EncoderAMF:
 		// VBR with bitrate cap (AMF CQP doesn't support maxrate)
@@ -250,6 +257,7 @@ func getEncoderArgs(encoder string, shortSide int, srcBitrateKbps int64, srcShor
 			"-maxrate", maxrate,
 			"-bufsize", bufsize,
 			"-profile:v", "high",
+			"-forced_idr", "1",
 		}
 	case EncoderQSV:
 		// Constrained quality — global_quality for quality, maxrate as cap
@@ -262,6 +270,7 @@ func getEncoderArgs(encoder string, shortSide int, srcBitrateKbps int64, srcShor
 			"-bufsize", bufsize,
 			"-look_ahead", "1",
 			"-profile:v", "high",
+			"-forced_idr", "1",
 		}
 	default: // CPU — constrained CRF (CRF for quality, maxrate as ceiling)
 		return []string{
@@ -272,8 +281,22 @@ func getEncoderArgs(encoder string, shortSide int, srcBitrateKbps int64, srcShor
 			"-bufsize", bufsize,
 			"-profile:v", "high",
 			"-threads", "0",
-			"-x264-params", "keyint=60:min-keyint=30:scenecut=40",
+			"-x264-params", "scenecut=0:open-gop=0",
 		}
+	}
+}
+
+// getHLSGOPArgs provides encoder-independent HLS boundaries. A very large
+// automatic GOP leaves keyframe placement to force_key_frames, which uses
+// timestamps rather than an assumed frame rate and therefore also works for
+// 23.976/29.97 fps and variable-frame-rate inputs. Encoder-specific args above
+// force those frames to be IDR where the hardware encoder exposes that option.
+func getHLSGOPArgs() []string {
+	return []string{
+		"-g", "999999",
+		"-sc_threshold", "0",
+		"-flags", "+cgop",
+		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", hlsKeyframeIntervalSeconds),
 	}
 }
 
@@ -322,6 +345,7 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 
 	// Add encoder-specific args (includes dynamic bitrate capping)
 	args = append(args, getEncoderArgs(encoder, shortSide, srcBitrateKbps, srcShortSide)...)
+	args = append(args, getHLSGOPArgs()...)
 
 	// Always use CPU-based scale filter (compatible with all encoders)
 	args = append(args, "-vf", scaleFilter)
@@ -359,6 +383,7 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 				cpuArgs = append(cpuArgs, "-map", "0:v:0")
 			}
 			cpuArgs = append(cpuArgs, getEncoderArgs(EncoderCPU, shortSide, srcBitrateKbps, srcShortSide)...)
+			cpuArgs = append(cpuArgs, getHLSGOPArgs()...)
 			cpuArgs = append(cpuArgs, "-vf", scaleFilter)
 			if includeAudio {
 				cpuArgs = append(cpuArgs, "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
