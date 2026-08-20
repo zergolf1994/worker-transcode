@@ -203,9 +203,6 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		return tempS3, nil
 	}
 	if permanentS3 == nil {
-		if config.AppConfig.MediaLayout == "separated" {
-			return fmt.Errorf("separated layout requires permanent S3 video storage: %w", queue.ErrJobRequeue)
-		}
 		if _, err := resolveTemp(); err != nil {
 			return fmt.Errorf("no permanent S3 or S3 temp available: %v: %w", err, queue.ErrJobRequeue)
 		}
@@ -279,10 +276,7 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 				if cause := context.Cause(ctx); cause != nil {
 					return cause
 				}
-				if config.AppConfig.MediaLayout == "separated" {
-					return fmt.Errorf("upload separated video %s: %v: %w", fileName, uploadErr, queue.ErrJobRequeue)
-				}
-				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp", slug, uploadErr)
+				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp → Local", slug, uploadErr)
 			} else {
 				if err := createPermanentVideoMedia(
 					ctx, fileID, slug, res, fileName, objectKey, permanentS3,
@@ -310,7 +304,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 			if err := uploader.UploadToS3(ctx, tempStorage, outputPath, objectKey, onUploadProgress); err != nil {
 				return fmt.Errorf("upload %s to S3 temp: %w", fileName, err)
 			}
-			if err := createTranscodeIngest(ctx, fileID, tempStorage, fileName, objectKey, size); err != nil {
+			layout := config.AppConfig.MediaLayout
+			metadata := &models.MediaMetadata{Size: size, Width: targetW, Height: targetH, Duration: videoInfo.DurationF, MediaLayout: &layout}
+			if err := createTranscodeIngest(ctx, fileID, tempStorage, fileName, objectKey, res, metadata, size); err != nil {
 				return fmt.Errorf("create ingest %s: %w", fileName, err)
 			}
 		}

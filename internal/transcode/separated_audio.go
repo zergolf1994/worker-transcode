@@ -32,25 +32,20 @@ func ensureSeparatedAudio(
 	}
 
 	missing := make([]transcoder.AudioStream, 0, len(streams))
-	for _, stream := range streams {
-		if !hasAudioMedia(ctx, fileID, stream.Index) {
+	for position, stream := range streams {
+		fileName := fmt.Sprintf("audio_%d.m4a", position+1)
+		if !hasAudioMedia(ctx, fileID, stream.Index) && !hasPendingIngest(ctx, fileID, fileName) {
 			missing = append(missing, stream)
 		}
 	}
 
 	var storage *models.Storage
 	if len(missing) > 0 {
-		storage, err = resolveS3VideoStorage(ctx)
-		if err != nil {
-			// Audio is a permanent media asset. Sending it through the old
-			// processed-video ingest path would make worker-transfer interpret it
-			// as MP4 video, so wait for durable S3 instead.
-			return 0, fmt.Errorf("no permanent S3 for %d missing audio track(s): %v: %w", len(missing), err, queue.ErrJobRequeue)
-		}
+		storage, _ = resolveS3VideoStorage(ctx)
 	}
 
 	for position, stream := range streams {
-		if hasAudioMedia(ctx, fileID, stream.Index) {
+		if hasAudioMedia(ctx, fileID, stream.Index) || hasPendingIngest(ctx, fileID, fmt.Sprintf("audio_%d.m4a", position+1)) {
 			continue
 		}
 		trackNumber := position + 1
@@ -76,43 +71,77 @@ func ensureSeparatedAudio(
 
 		objectKey := fmt.Sprintf("%s/%s", fileID, fileName)
 		startStep(ctx, job.ID, uploadStep)
-		utils.LogMain("📤 [%s] Uploading %s → permanent S3 %s", slug, fileName, storage.Name)
 		logUpload := pctLogger64(slug, uploadStep)
 		writeUpload := stepThrottle(1)
-		if err := uploader.UploadToS3(ctx, storage, outputPath, objectKey, func(done, total int64) {
-			logUpload(done, total)
-			if total > 0 {
-				percent := float64(done) / float64(total) * 100
-				if writeUpload(percent) {
-					updateStepAndOverall(ctx, job.ID, uploadStep, percent, 10)
+		upload := func(target *models.Storage, key string) error {
+			return uploader.UploadToS3(ctx, target, outputPath, key, func(done, total int64) {
+				logUpload(done, total)
+				if total > 0 {
+					percent := float64(done) / float64(total) * 100
+					if writeUpload(percent) {
+						updateStepAndOverall(ctx, job.ID, uploadStep, percent, 10)
+					}
 				}
-			}
-		}); err != nil {
-			return 0, fmt.Errorf("upload %s: %w", fileName, err)
+			})
 		}
 
 		info, err := os.Stat(outputPath)
 		if err != nil {
 			return 0, fmt.Errorf("stat %s: %w", fileName, err)
 		}
-		if err := createPermanentAudioMedia(ctx, fileID, slug, fileName, objectKey, storage, info.Size(), stream); err != nil {
-			return 0, fmt.Errorf("create audio media %s: %w", fileName, err)
+		installedDirect := false
+		if storage != nil {
+			utils.LogMain("📤 [%s] Uploading %s → permanent S3 %s", slug, fileName, storage.Name)
+			if uploadErr := upload(storage, objectKey); uploadErr == nil {
+				if err := createPermanentAudioMedia(ctx, fileID, slug, fileName, objectKey, storage, info.Size(), stream); err != nil {
+					return 0, fmt.Errorf("create audio media %s: %w", fileName, err)
+				}
+				installedDirect = true
+			} else {
+				utils.LogMain("⚠️  [%s] Permanent audio upload failed: %v — falling back to Temp → Local", slug, uploadErr)
+			}
+		}
+		if !installedDirect {
+			tempStorage, tempErr := resolveS3TempStorage(ctx)
+			if tempErr != nil {
+				return 0, fmt.Errorf("no Temp fallback for %s: %v: %w", fileName, tempErr, queue.ErrJobRequeue)
+			}
+			objectKey = fmt.Sprintf("%s/%s_%s", time.Now().Format("2006-01-02"), fileID, fileName)
+			utils.LogMain("📤 [%s] Uploading %s → Temp %s", slug, fileName, tempStorage.Name)
+			if err := upload(tempStorage, objectKey); err != nil {
+				return 0, fmt.Errorf("upload audio fallback %s: %w", fileName, err)
+			}
+			if err := createAudioIngest(ctx, fileID, fileName, objectKey, tempStorage, info.Size(), stream); err != nil {
+				return 0, fmt.Errorf("create audio ingest %s: %w", fileName, err)
+			}
 		}
 		completeStep(ctx, job.ID, uploadStep)
 		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
 			return 0, fmt.Errorf("remove uploaded audio %s: %w", fileName, err)
 		}
-		utils.LogMain("✅ [%s] Audio track %d ready on permanent S3", slug, trackNumber)
+		utils.LogMain("✅ [%s] Audio track %d uploaded", slug, trackNumber)
 	}
+	return len(streams), nil
+}
 
-	audioCount, err := models.MediaModel.CountDocuments(ctx, bson.M{
-		"fileId": fileID, "type": enums.MediaTypeAudio,
-		"deletedAt": bson.M{"$exists": false},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("count audio medias: %w", err)
+func createAudioIngest(ctx context.Context, fileID, fileName, objectKey string, storage *models.Storage, size int64, stream transcoder.AudioStream) error {
+	if hasPendingIngest(ctx, fileID, fileName) {
+		return nil
 	}
-	return int(audioCount), nil
+	mimeType, mediaType, installTarget := "audio/mp4", enums.MediaTypeAudio, "local"
+	sourceCodec, codec, language, title, layout := stream.Codec, "aac", stream.Language, stream.Title, "separated"
+	channels, sampleRate, bitrate := 2, 48000, int64(192000)
+	metadata := &models.MediaMetadata{Size: size, Duration: stream.Duration, SourceIndex: &stream.Index,
+		SourceCodec: &sourceCodec, Codec: &codec, Language: &language, Title: &title,
+		IsDefault: &stream.Default, IsForced: &stream.Forced, Channels: &channels,
+		SampleRate: &sampleRate, Bitrate: &bitrate, MediaLayout: &layout}
+	now := time.Now()
+	ingest := models.Ingest{ID: newUUID(), FileID: &fileID, StorageID: &storage.ID, FileName: fileName,
+		Status: "completed", Size: size, MimeType: &mimeType, Path: &objectKey,
+		SourceType: enums.IngestSourceTypeProcessed, MediaType: &mediaType,
+		MediaMetadata: metadata, InstallTarget: &installTarget, CreatedAt: now, UpdatedAt: now}
+	_, err := models.IngestModel.Create(ctx, &ingest)
+	return err
 }
 
 func hasAudioMedia(ctx context.Context, fileID string, sourceIndex int) bool {

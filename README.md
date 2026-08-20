@@ -1,5 +1,7 @@
 # Worker Transcode
 
+Permanent S3 upload failures fall back to Temp → Local. Separated video/audio ingests preserve track metadata for worker-transfer.
+
 Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) — แปลงวิดีโอเป็นหลาย resolution (360/480/720/1080) แล้วส่งเข้าท่อ ingest ให้ worker-transfer ติดตั้งลง storage
 
 > แทนที่ `server-transcode` เดิมที่ scan หาไฟล์เอง — ตัวนี้รับงานจากคิวอย่างเดียว **ไม่ผูก storage**: เครื่องไหนก็รันได้ (โหลด original ผ่าน storage-node หรือ S3 `originUrl` → encode → permanent S3; fallback S3 temp)

@@ -80,12 +80,14 @@ func resolutionCovered(ctx context.Context, fileID, res string) (covered bool, r
 // createTranscodeIngest สร้าง ingest processed ให้ worker-transfer —
 // key แบบมีวันที่เหมือน worker-download ({date}/{fileId}_{fileName})
 // ingest.path เป็น source of truth ฝั่งอ่านทั้งหมด
-func createTranscodeIngest(ctx context.Context, fileID string, s3Storage *models.Storage, fileName, objectKey string, size int64) error {
+func createTranscodeIngest(ctx context.Context, fileID string, s3Storage *models.Storage, fileName, objectKey, resolution string, metadata *models.MediaMetadata, size int64) error {
 	if hasPendingIngest(ctx, fileID, fileName) {
 		return nil
 	}
 	now := time.Now()
 	mimeType := "video/mp4"
+	mediaType := enums.MediaTypeVideo
+	installTarget := "local"
 	storageID := s3Storage.ID
 	key := objectKey
 	ingest := models.Ingest{
@@ -98,8 +100,10 @@ func createTranscodeIngest(ctx context.Context, fileID string, s3Storage *models
 		MimeType:   &mimeType,
 		Path:       &key,
 		SourceType: enums.IngestSourceTypeProcessed,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		MediaType:  &mediaType, Resolution: &resolution, MediaMetadata: metadata,
+		InstallTarget: &installTarget,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if _, err := models.IngestModel.Create(ctx, &ingest); err != nil {
 		return err
