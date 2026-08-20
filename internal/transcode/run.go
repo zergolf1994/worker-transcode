@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"worker-transcode/internal/config"
 	"worker-transcode/internal/core/enums"
 	"worker-transcode/internal/core/utils"
 	"worker-transcode/internal/db/models"
@@ -139,6 +140,20 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 	utils.LogMain("📐 [%s] %dx%d %ds codec=%s bitrate=%dkbps shortSide=%d",
 		slug, videoInfo.Width, videoInfo.Height, videoInfo.Duration, videoInfo.Codec, videoInfo.VideoBitrate, shortSide)
 
+	// In separated mode, legacy originals can still contain embedded audio.
+	// Extract missing tracks once before encoding video-only renditions. New
+	// separated originals normally contain no audio, so this is a cheap no-op.
+	audioTrackCount := -1
+	if config.AppConfig.MediaLayout == "separated" {
+		if err := rejectLegacyMuxedRenditions(ctx, fileID); err != nil {
+			return err
+		}
+		audioTrackCount, err = ensureSeparatedAudio(ctx, job, fileID, slug, originalPath, workDir)
+		if err != nil {
+			return fmt.Errorf("separate audio: %w", err)
+		}
+	}
+
 	// ─── STEP 3: DETERMINE resolutions ────────────────────────
 	var pending []string
 	for _, res := range transcoder.DetermineResolutions(shortSide) {
@@ -153,6 +168,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		// ทุก resolution ครบแล้ว — จบงาน + ประทับ highest กัน enqueuer หยิบซ้ำ
 		utils.LogMain("✅ [%s] All resolutions covered — completing", slug)
 		setHighest(ctx, fileID, slug, highestCovered(ctx, fileID))
+		if audioTrackCount >= 0 {
+			setSeparatedFileMetadata(ctx, fileID, audioTrackCount)
+		}
 		success = true
 		return nil
 	}
@@ -185,6 +203,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		return tempS3, nil
 	}
 	if permanentS3 == nil {
+		if config.AppConfig.MediaLayout == "separated" {
+			return fmt.Errorf("separated layout requires permanent S3 video storage: %w", queue.ErrJobRequeue)
+		}
 		if _, err := resolveTemp(); err != nil {
 			return fmt.Errorf("no permanent S3 or S3 temp available: %v: %w", err, queue.ErrJobRequeue)
 		}
@@ -209,7 +230,11 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		// ── encode (retry resume skips only a finalized, full-duration MP4) ──
 		encodeStep := fmt.Sprintf("encode_%s", res)
 		if info, statErr := os.Stat(outputPath); statErr == nil && info.Size() > 0 {
-			if validateErr := transcoder.ValidateEncodedOutput(outputPath, videoInfo.DurationF); validateErr == nil {
+			validateErr := transcoder.ValidateEncodedOutput(outputPath, videoInfo.DurationF)
+			if validateErr == nil && config.AppConfig.MediaLayout == "separated" {
+				validateErr = transcoder.ValidateVideoOnlyOutput(outputPath)
+			}
+			if validateErr == nil {
 				utils.LogMain("⏭️  [%s] %sp already encoded and verified (retry resume) — skipping encode", slug, res)
 				completeStep(ctx, job.ID, encodeStep)
 			} else {
@@ -253,6 +278,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 			if uploadErr := uploader.UploadToS3(ctx, permanentS3, outputPath, objectKey, onUploadProgress); uploadErr != nil {
 				if cause := context.Cause(ctx); cause != nil {
 					return cause
+				}
+				if config.AppConfig.MediaLayout == "separated" {
+					return fmt.Errorf("upload separated video %s: %v: %w", fileName, uploadErr, queue.ErrJobRequeue)
 				}
 				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp", slug, uploadErr)
 			} else {
@@ -311,6 +339,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		highest = h
 	}
 	setHighest(ctx, fileID, slug, highest)
+	if audioTrackCount >= 0 {
+		setSeparatedFileMetadata(ctx, fileID, audioTrackCount)
+	}
 	updateOverallPercent(ctx, job.ID, 100)
 
 	success = true
@@ -328,7 +359,8 @@ func encodeResolution(ctx context.Context, job *models.VideoProcess, slug, res, 
 	write := stepThrottle(1)
 	logEncodeProgress := pctLogger(slug, encodeStep)
 	err := transcoder.EncodeResolution(ctx, originalPath, outputPath, targetW, targetH,
-		videoInfo.DurationF, videoInfo.VideoBitrate, shortSide, func(percent int) {
+		videoInfo.DurationF, videoInfo.VideoBitrate, shortSide,
+		config.AppConfig.MediaLayout != "separated", func(percent int) {
 			logEncodeProgress(percent)
 			if write(float64(percent)) {
 				// encode กิน 70% ของช่วง res นี้ upload อีก 30%

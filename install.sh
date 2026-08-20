@@ -16,6 +16,7 @@ WORKER_COUNT=1
 UNINSTALL=false
 DATABASE_URL=""
 DASHBOARD_PORT="8886"
+MEDIA_LAYOUT="muxed"
 
 APP_NAME="worker-transcode"
 APP_DIR="/opt/$APP_NAME"
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --database-url)      DATABASE_URL="$2"; shift 2 ;;
         --mongodb-uri)       DATABASE_URL="$2"; shift 2 ;; # alias เดิม
         --port)              DASHBOARD_PORT="$2"; shift 2 ;;
+        --media-layout)      MEDIA_LAYOUT="$2"; shift 2 ;;
         -h|--help)
             echo "Worker Transcode Installer"
             echo ""
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -w, -n NUM           Alias for --count"
             echo "  --database-url URI   MongoDB connection string (DATABASE_URL)"
             echo "  --port PORT          Realtime monitor port (default: 8886; worker @1 only)"
+            echo "  --media-layout MODE  muxed (legacy) or separated (video-only + audio media)"
             echo "  -h, --help           Show this help"
             echo ""
             echo "Examples:"
@@ -64,6 +67,11 @@ while [[ $# -gt 0 ]]; do
             print_error "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+if [ "$MEDIA_LAYOUT" != "muxed" ] && [ "$MEDIA_LAYOUT" != "separated" ]; then
+    print_error "--media-layout must be muxed or separated"
+    exit 1
+fi
 
 # ─── Uninstall ────────────────────────────────────────────────
 if [ "$UNINSTALL" = true ]; then
@@ -178,6 +186,7 @@ cat > "$APP_DIR/.env" <<EOF
 DATABASE_URL=$DATABASE_URL
 DASHBOARD_PORT=$DASHBOARD_PORT
 S3_UPLOAD_CONCURRENCY=2
+MEDIA_LAYOUT=$MEDIA_LAYOUT
 EOF
 
 # ─── Systemd service template ─────────────────────────────────

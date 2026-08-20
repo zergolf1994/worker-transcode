@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"worker-transcode/internal/cache"
+	"worker-transcode/internal/config"
 	"worker-transcode/internal/core/enums"
 	"worker-transcode/internal/core/utils"
 	"worker-transcode/internal/db/models"
@@ -135,6 +136,7 @@ func createPermanentVideoMedia(
 
 	now := time.Now()
 	mimeType := "video/mp4"
+	mediaLayout := config.AppConfig.MediaLayout
 	media := models.Media{
 		ID:         newUUID(),
 		Type:       enums.MediaTypeVideo,
@@ -146,10 +148,11 @@ func createPermanentVideoMedia(
 		Path:       &objectKey,
 		FileID:     &fileID,
 		Metadata: &models.MediaMetadata{
-			Size:     size,
-			Width:    width,
-			Height:   height,
-			Duration: duration,
+			Size:        size,
+			Width:       width,
+			Height:      height,
+			Duration:    duration,
+			MediaLayout: &mediaLayout,
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -186,6 +189,9 @@ func cloneMediaToClonedFiles(ctx context.Context, sourceFileID string, media mod
 		}
 		if media.Resolution != nil {
 			filter["resolution"] = *media.Resolution
+		}
+		if media.FileName != nil {
+			filter["fileName"] = *media.FileName
 		}
 		if count, _ := models.MediaModel.CountDocuments(ctx, filter); count > 0 {
 			continue

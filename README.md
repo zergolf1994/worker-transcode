@@ -56,6 +56,7 @@ DATABASE_URL=mongodb+srv://user:pass@cluster.mongodb.net/platform
 WORKER_ID=transcode_myhost@1
 REDIS_URL=redis://localhost:6379/0
 S3_UPLOAD_CONCURRENCY=2
+MEDIA_LAYOUT=muxed # muxed | separated
 ```
 
 ## Settings ใน DB (collection `settings`)
@@ -69,8 +70,8 @@ S3_UPLOAD_CONCURRENCY=2
 ## Transcode Flow (1 job = 1 file)
 
 1. **download (10%)** — Local โหลดจาก storage-node; S3 โหลดจาก `https://{originUrl}/{fileId}/{fileName}` — cache ไว้ retry
-2. **probe** — ขนาด/ความยาว/bitrate → คำนวณ resolutions เป้าหมาย
-3. **encode_{res} + upload_{res} (85%)** — ทีละ resolution: ffmpeg → permanent S3 (`{fileId}/file_{res}.mp4`) → Media/Clone → Redis/Cloudflare playlist purge → ลบ local output ทันที; ถ้าไม่มีหรืออัพไม่สำเร็จ จึง fallback S3 temp + ingest ให้ worker-transfer ติดตั้ง
+2. **probe** — ขนาด/ความยาว/bitrate → คำนวณ resolutions เป้าหมาย; เมื่อ `MEDIA_LAYOUT=separated` จะดึง audio ที่ยังฝังใน original เป็น `{fileId}/audio_N.m4a` ก่อน
+3. **encode_{res} + upload_{res} (85%)** — ทีละ resolution: `muxed` จะคงเสียง AAC ใน MP4 แบบเดิม ส่วน `separated` จะสร้าง MP4 แบบ video-only → permanent S3 (`{fileId}/file_{res}.mp4`) → Media/Clone → ลบ local output ทันที; ถ้าไม่มีหรืออัพไม่สำเร็จ จึง fallback S3 temp + ingest ให้ worker-transfer ติดตั้ง
 4. **finish (100%)** — `file.metadata.highest` + clones
 
 ```

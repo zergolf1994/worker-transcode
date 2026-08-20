@@ -37,6 +37,22 @@ func ValidateEncodedOutput(filePath string, expectedDuration float64) error {
 	return nil
 }
 
+// ValidateVideoOnlyOutput rejects retry artifacts created previously in muxed
+// mode. Without this check, switching MEDIA_LAYOUT could reuse an MP4 that
+// still contains an embedded audio stream.
+func ValidateVideoOnlyOutput(filePath string) error {
+	cmd := exec.Command("ffprobe", "-v", "error", "-select_streams", "a",
+		"-show_entries", "stream=index", "-of", "csv=p=0", filePath)
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("ffprobe audio streams: %w", err)
+	}
+	if strings.TrimSpace(string(output)) != "" {
+		return fmt.Errorf("encoded output still contains audio")
+	}
+	return nil
+}
+
 // VideoInfo contains video metadata from ffprobe
 type VideoInfo struct {
 	Width        int64

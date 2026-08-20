@@ -28,6 +28,7 @@ type Config struct {
 
 	// Number of multipart S3 parts uploaded in parallel.
 	S3UploadConcurrency int
+	MediaLayout         string
 }
 
 // Load reads configuration from environment variables (and .env file).
@@ -42,6 +43,16 @@ func Load() {
 		StoragePath:         getEnv("STORAGE_PATH", ""),
 		RedisURL:            getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
 		S3UploadConcurrency: getIntEnv("S3_UPLOAD_CONCURRENCY", 2, 1, 8),
+		MediaLayout:         getMediaLayoutEnv(),
+	}
+}
+
+func getMediaLayoutEnv() string {
+	switch getEnv("MEDIA_LAYOUT", "muxed") {
+	case "separated":
+		return "separated"
+	default:
+		return "muxed"
 	}
 }
 

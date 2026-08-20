@@ -280,7 +280,7 @@ func getEncoderArgs(encoder string, shortSide int, srcBitrateKbps int64, srcShor
 // EncodeResolution encodes a video file to a specific resolution
 // Auto-detects GPU encoder, fallback to CPU
 // srcBitrateKbps/srcShortSide: original file's video bitrate and short side for dynamic capping
-func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW, targetH int, totalDuration float64, srcBitrateKbps int64, srcShortSide int, onProgress func(percent int)) error {
+func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW, targetH int, totalDuration float64, srcBitrateKbps int64, srcShortSide int, includeAudio bool, onProgress func(percent int)) error {
 	encoder := DetectEncoder()
 	scaleFilter := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2", targetW, targetH)
 
@@ -316,6 +316,9 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 	}
 
 	args = append(args, "-i", inputPath)
+	if !includeAudio {
+		args = append(args, "-map", "0:v:0")
+	}
 
 	// Add encoder-specific args (includes dynamic bitrate capping)
 	args = append(args, getEncoderArgs(encoder, shortSide, srcBitrateKbps, srcShortSide)...)
@@ -324,14 +327,12 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 	args = append(args, "-vf", scaleFilter)
 	args = append(args, "-pix_fmt", "yuv420p")
 
-	args = append(args,
-		"-c:a", "aac",
-		"-b:a", audioBitrate,
-		"-ac", "2",
-		"-ar", "48000",
-		"-movflags", "+faststart",
-		outputPath,
-	)
+	if includeAudio {
+		args = append(args, "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
+	} else {
+		args = append(args, "-an")
+	}
+	args = append(args, "-sn", "-dn", "-movflags", "+faststart", outputPath)
 
 	bitrate, _, _ := getBitrateForRes(shortSide, srcBitrateKbps, srcShortSide)
 	log.Printf("🔧 Encoder: %s | CRF/CQ: %d | Bitrate: %s | Audio: %s | SrcBR: %dkbps", encoder, getCRF(shortSide), bitrate, audioBitrate, srcBitrateKbps)
@@ -354,17 +355,17 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 				"-progress", "pipe:1",
 				"-i", inputPath,
 			}
+			if !includeAudio {
+				cpuArgs = append(cpuArgs, "-map", "0:v:0")
+			}
 			cpuArgs = append(cpuArgs, getEncoderArgs(EncoderCPU, shortSide, srcBitrateKbps, srcShortSide)...)
-			cpuArgs = append(cpuArgs,
-				"-vf", scaleFilter,
-				"-c:a", "aac",
-				"-b:a", audioBitrate,
-				"-ac", "2",
-				"-ar", "48000",
-				"-movflags", "+faststart",
-				"-pix_fmt", "yuv420p",
-				outputPath,
-			)
+			cpuArgs = append(cpuArgs, "-vf", scaleFilter)
+			if includeAudio {
+				cpuArgs = append(cpuArgs, "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
+			} else {
+				cpuArgs = append(cpuArgs, "-an")
+			}
+			cpuArgs = append(cpuArgs, "-sn", "-dn", "-movflags", "+faststart", "-pix_fmt", "yuv420p", outputPath)
 
 			cmd2 := exec.CommandContext(ctx, "ffmpeg", cpuArgs...)
 			err = runFFmpegWithProgress(cmd2, totalDuration, onProgress)
