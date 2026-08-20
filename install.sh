@@ -73,7 +73,7 @@ if [ "$MEDIA_LAYOUT" != "muxed" ] && [ "$MEDIA_LAYOUT" != "separated" ]; then
     exit 1
 fi
 
-# ─── Uninstall ────────────────────────────────────────────────
+# Uninstall
 if [ "$UNINSTALL" = true ]; then
     print_warning "⚠️  Starting Uninstallation..."
     for i in $(seq 1 20); do
@@ -98,7 +98,7 @@ fi
 
 print_status "🚀 Starting Installation... (Workers: $WORKER_COUNT)"
 
-# ─── System Dependencies ──────────────────────────────────────
+# System Dependencies
 # transcode ใช้ ffmpeg/ffprobe encode — ต้องติดตั้งด้วย
 # (GPU: ถ้ามี NVIDIA driver + nvenc ffmpeg จะ auto-detect เอง)
 print_status "Installing system dependencies (curl, ffmpeg)..."
@@ -118,7 +118,7 @@ for cmd in curl; do
     fi
 done
 
-# ─── NVIDIA NVENC runtime ─────────────────────────────────────
+# NVIDIA NVENC runtime
 # The installer deliberately does not install/replace the kernel driver. If a
 # working NVIDIA driver is already present, install the matching user-space
 # encode/decode libraries that FFmpeg loads at runtime.
@@ -153,17 +153,17 @@ else
     print_warning "NVIDIA driver not detected — worker will use CPU encoding until a driver is installed."
 fi
 
-# ─── Stop existing services ───────────────────────────────────
+# Stop existing services
 print_status "Stopping existing services..."
 systemctl stop ${SERVICE_NAME}@* 2>/dev/null || true
 systemctl stop ${SERVICE_NAME}   2>/dev/null || true
 
-# ─── Create app directory ─────────────────────────────────────
+# Create app directory
 print_status "Creating app directory: $APP_DIR"
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
-# ─── Download binary ──────────────────────────────────────────
+# Download binary
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
     BINARY="linux"
@@ -179,7 +179,7 @@ curl -fsSL "$RELEASES_URL/$BINARY" -o "$APP_DIR/$APP_NAME"
 chmod +x "$APP_DIR/$APP_NAME"
 print_status "Binary downloaded."
 
-# ─── Create .env ─────────────────────────────────────────────
+# Create .env
 # ⚠ ตัวโปรแกรมอ่าน DATABASE_URL (ไม่ใช่ MONGODB_URI แบบระบบเก่า)
 print_status "Creating .env file..."
 cat > "$APP_DIR/.env" <<EOF
@@ -189,7 +189,7 @@ S3_UPLOAD_CONCURRENCY=2
 MEDIA_LAYOUT=$MEDIA_LAYOUT
 EOF
 
-# ─── Systemd service template ─────────────────────────────────
+# Systemd service template
 print_status "Creating systemd service template..."
 
 cat > /etc/systemd/system/${SERVICE_NAME}@.service <<EOF
@@ -213,7 +213,7 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 EOF
 
-# ─── Enable & start workers ───────────────────────────────────
+# Enable & start workers
 systemctl daemon-reload
 print_status "Starting $WORKER_COUNT worker(s)..."
 for i in $(seq 1 $WORKER_COUNT); do
@@ -222,7 +222,7 @@ for i in $(seq 1 $WORKER_COUNT); do
     sleep 0.3
 done
 
-# ─── Verify ───────────────────────────────────────────────────
+# Verify
 sleep 2
 RUNNING=0
 for i in $(seq 1 $WORKER_COUNT); do
