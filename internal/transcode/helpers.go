@@ -87,7 +87,6 @@ func createTranscodeIngest(ctx context.Context, fileID string, s3Storage *models
 	now := time.Now()
 	mimeType := "video/mp4"
 	mediaType := enums.MediaTypeVideo
-	installTarget := "local"
 	storageID := s3Storage.ID
 	key := objectKey
 	ingest := models.Ingest{
@@ -101,9 +100,8 @@ func createTranscodeIngest(ctx context.Context, fileID string, s3Storage *models
 		Path:       &key,
 		SourceType: enums.IngestSourceTypeProcessed,
 		MediaType:  &mediaType, Resolution: &resolution, MediaMetadata: metadata,
-		InstallTarget: &installTarget,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if _, err := models.IngestModel.Create(ctx, &ingest); err != nil {
 		return err
@@ -408,6 +406,25 @@ func gpuEnabledFromSetting(ctx context.Context) bool {
 
 // resolveS3VideoStorage finds directly playable durable S3 storage. originUrl
 // is required because storage-node/nginx-vod reads the uploaded MP4 through it.
+const localStorageMaxPercent = 95.0
+
+// Keep producer placement aligned with vdohide-service: while any Local node
+// can receive files, outputs are staged in Temp for worker-transfer. Permanent
+// S3/B2 becomes the direct destination only after every Local reaches 95%.
+func hasAvailableLocalStorage(ctx context.Context) bool {
+	count, err := models.StorageModel.CountDocuments(ctx, bson.M{
+		"enable": true,
+		"status": enums.StorageStatusOnline,
+		"type":   enums.StorageTypeLocal,
+		"$or": []bson.M{
+			{"capacity.percentage": bson.M{"$lt": localStorageMaxPercent}},
+			{"capacity.percentage": bson.M{"$exists": false}},
+			{"capacity": bson.M{"$exists": false}},
+		},
+	})
+	return err == nil && count > 0
+}
+
 func resolveS3VideoStorage(ctx context.Context) (*models.Storage, error) {
 	filter := bson.M{
 		"enable":    true,

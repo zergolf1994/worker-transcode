@@ -40,7 +40,7 @@ func ensureSeparatedAudio(
 	}
 
 	var storage *models.Storage
-	if len(missing) > 0 {
+	if len(missing) > 0 && !hasAvailableLocalStorage(ctx) {
 		storage, _ = resolveS3VideoStorage(ctx)
 	}
 
@@ -128,7 +128,7 @@ func createAudioIngest(ctx context.Context, fileID, fileName, objectKey string, 
 	if hasPendingIngest(ctx, fileID, fileName) {
 		return nil
 	}
-	mimeType, mediaType, installTarget := "audio/mp4", enums.MediaTypeAudio, "local"
+	mimeType, mediaType := "audio/mp4", enums.MediaTypeAudio
 	sourceCodec, codec, language, title, layout := stream.Codec, "aac", stream.Language, stream.Title, "separated"
 	channels, sampleRate, bitrate := 2, 48000, int64(192000)
 	metadata := &models.MediaMetadata{Size: size, Duration: stream.Duration, SourceIndex: &stream.Index,
@@ -139,7 +139,7 @@ func createAudioIngest(ctx context.Context, fileID, fileName, objectKey string, 
 	ingest := models.Ingest{ID: newUUID(), FileID: &fileID, StorageID: &storage.ID, FileName: fileName,
 		Status: "completed", Size: size, MimeType: &mimeType, Path: &objectKey,
 		SourceType: enums.IngestSourceTypeProcessed, MediaType: &mediaType,
-		MediaMetadata: metadata, InstallTarget: &installTarget, CreatedAt: now, UpdatedAt: now}
+		MediaMetadata: metadata, CreatedAt: now, UpdatedAt: now}
 	_, err := models.IngestModel.Create(ctx, &ingest)
 	return err
 }

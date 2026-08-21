@@ -189,7 +189,10 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 	// Prefer durable S3 and create playable media immediately. Temp/transfer is
 	// retained as a fallback when no permanent S3 is available or its upload
 	// fails temporarily.
-	permanentS3, _ := resolveS3VideoStorage(ctx)
+	var permanentS3 *models.Storage
+	if !hasAvailableLocalStorage(ctx) {
+		permanentS3, _ = resolveS3VideoStorage(ctx)
+	}
 	var tempS3 *models.Storage
 	resolveTemp := func() (*models.Storage, error) {
 		if tempS3 != nil {
