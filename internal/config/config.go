@@ -29,6 +29,15 @@ type Config struct {
 	// Number of multipart S3 parts uploaded in parallel.
 	S3UploadConcurrency int
 	MediaLayout         string
+
+	// TranscodePipelineMode controls how renditions are scheduled:
+	// adaptive (default), fanout, or sequential. Adaptive uses GPU fanout for
+	// short inputs, prioritizes 360p for long high-resolution inputs, and
+	// always keeps CPU encoding sequential.
+	TranscodePipelineMode  string
+	FanoutMaxMinutes       int
+	TranscodeUploadOverlap bool
+	MaxParallelUploads     int
 }
 
 // Load reads configuration from environment variables (and .env file).
@@ -37,13 +46,28 @@ func Load() {
 	godotenv.Load()
 
 	AppConfig = Config{
-		DashboardPort:       getEnv("DASHBOARD_PORT", getEnv("PORT", "8886")),
-		MongoURI:            getEnv("DATABASE_URL", "mongodb://localhost:27017"),
-		StorageId:           getEnv("STORAGE_ID", ""),
-		StoragePath:         getEnv("STORAGE_PATH", ""),
-		RedisURL:            getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
-		S3UploadConcurrency: getIntEnv("S3_UPLOAD_CONCURRENCY", 2, 1, 8),
-		MediaLayout:         getMediaLayoutEnv(),
+		DashboardPort:          getEnv("DASHBOARD_PORT", getEnv("PORT", "8886")),
+		MongoURI:               getEnv("DATABASE_URL", "mongodb://localhost:27017"),
+		StorageId:              getEnv("STORAGE_ID", ""),
+		StoragePath:            getEnv("STORAGE_PATH", ""),
+		RedisURL:               getEnv("REDIS_URL", getEnv("RADIS_URL", "")),
+		S3UploadConcurrency:    getIntEnv("S3_UPLOAD_CONCURRENCY", 2, 1, 8),
+		MediaLayout:            getMediaLayoutEnv(),
+		TranscodePipelineMode:  getTranscodePipelineModeEnv(),
+		FanoutMaxMinutes:       getIntEnv("TRANSCODE_FANOUT_MAX_MINUTES", 30, 1, 1440),
+		TranscodeUploadOverlap: getBoolEnv("TRANSCODE_UPLOAD_OVERLAP", true),
+		MaxParallelUploads:     getIntEnv("TRANSCODE_MAX_PARALLEL_UPLOADS", 2, 1, 4),
+	}
+}
+
+func getTranscodePipelineModeEnv() string {
+	switch getEnv("TRANSCODE_PIPELINE_MODE", "adaptive") {
+	case "sequential":
+		return "sequential"
+	case "fanout":
+		return "fanout"
+	default:
+		return "adaptive"
 	}
 }
 
@@ -68,6 +92,18 @@ func getIntEnv(key string, fallback, minValue, maxValue int) int {
 		return maxValue
 	}
 	return value
+}
+
+func getBoolEnv(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func getEnv(key, fallback string) string {

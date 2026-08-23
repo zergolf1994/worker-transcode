@@ -54,3 +54,34 @@ func TestEncoderArgsDisableAdaptiveKeyframes(t *testing.T) {
 		}
 	}
 }
+
+func TestResetForcedCPURedetectsGPUOnNextJob(t *testing.T) {
+	encoderMu.Lock()
+	originalDetectedEncoder := detectedEncoder
+	originalGPUEnabled := gpuEnabled
+	originalEncoderDetected := encoderDetected
+	originalForcedCPU := encoderForcedCPU
+	gpuEnabled = true
+	encoderMu.Unlock()
+
+	t.Cleanup(func() {
+		encoderMu.Lock()
+		detectedEncoder = originalDetectedEncoder
+		gpuEnabled = originalGPUEnabled
+		encoderDetected = originalEncoderDetected
+		encoderForcedCPU = originalForcedCPU
+		encoderMu.Unlock()
+	})
+
+	ForceCPU()
+	ResetForcedCPU()
+
+	encoderMu.Lock()
+	defer encoderMu.Unlock()
+	if encoderDetected {
+		t.Fatal("encoder detection remained cached after per-job CPU fallback")
+	}
+	if encoderForcedCPU {
+		t.Fatal("forced CPU marker was not cleared")
+	}
+}

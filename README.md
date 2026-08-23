@@ -12,6 +12,7 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 - **S3 native** — original บน S3 โหลดผ่าน `originUrl`; rendition อัพขึ้น permanent S3 และสร้าง Media/Clone ทันที
 - **Dynamic resolutions** — 360 เสมอ + 480/720/1080 ตาม short side ของต้นฉบับ (YouTube-style 95% tolerance เช่น 478px ก็ได้ 480p) ข้าม resolution ที่มี media/ingest อยู่แล้ว
 - **GPU auto-detect** — NVIDIA nvenc → AMD amf → Intel qsv → CPU (libx264) | encode fail บน GPU → fallback CPU อัตโนมัติ | ปิด GPU ได้ผ่าน setting `transcode_config.gpuEnabled`
+- **Adaptive fanout** — GPU + วิดีโอไม่เกิน 30 นาที decode ครั้งเดียวแล้ว encode ทุก resolution พร้อมกัน; วิดีโอยาว 720p+ ทำ 360p ให้พร้อมก่อนแล้ว fanout ที่เหลือ; CPU ทำทีละ resolution เสมอ
 - **Dynamic bitrate capping** — cap ตาม bitrate ต้นฉบับ (สัดส่วน pixel² × 0.85) ไฟล์ output ไม่บวมเกินต้นฉบับ
 - **Retry resume** — fail แล้ว retry ใช้ของเดิมต่อ: original ที่โหลดค้าง (เช็คขนาดกับ metadata) + resolution ที่ encode เสร็จแล้วไม่ทำซ้ำ
 - **Instant Cancel** — admin เซ็ต `status: cancelled` → context ยกเลิก → **ffmpeg โดน kill ทันที** (CommandContext) + เก็บกวาด temp
@@ -32,6 +33,9 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 
 ## Installation (Linux Server)
 
+สำหรับ Runpod GPU Pod ดูคู่มือแบบครบตั้งแต่เลือก GPU, สร้าง Template, ตั้ง Secret,
+เปิดหลาย worker และตรวจ NVENC ที่ [INSTALL_RUNPOD.md](INSTALL_RUNPOD.md)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zergolf1994/worker-transcode/main/install.sh | sudo -E bash -s -- \
     --database-url "mongodb+srv://user:pass@cluster.mongodb.net/platform" \
@@ -40,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/zergolf1994/worker-transcode/main/i
 
 | Option | Default | คำอธิบาย |
 |---|---|---|
-| `-n, -w, --count` | `1` | จำนวน worker instances (CPU: 1 แนะนำ / GPU: หลายตัวได้) |
+| `-n, -w, --count` | `1` | จำนวน worker instances; adaptive GPU ควรเริ่ม 1 แล้ว benchmark ก่อนเพิ่มเป็น 2 |
 | `--database-url` | `""` | MongoDB connection string (`DATABASE_URL`) |
 | `--uninstall` | — | ถอนการติดตั้ง |
 
@@ -48,6 +52,20 @@ curl -fsSL https://raw.githubusercontent.com/zergolf1994/worker-transcode/main/i
 journalctl -u "worker-transcode@*" -f              # ดู logs
 for i in $(seq 1 2); do systemctl restart worker-transcode@$i; done
 ```
+
+## ทดสอบ 2 Workers บน Windows
+
+หลังจากรัน `build.bat` แล้ว เปิด Terminal จากโฟลเดอร์ repository:
+
+```bat
+.\run-2-workers.cmd
+```
+
+สคริปต์จะเปิด `.build\windows.exe` เป็น worker `@1` และ `@2` โดย Dashboard ใช้
+`http://localhost:8886` ร่วมกัน กด `Ctrl+C` เพื่อหยุดทั้งสอง process
+
+ถ้าใช้ PowerShell โดยตรงสามารถรัน `.\run-2-workers.ps1` ได้ ส่วน Git Bash ให้ใช้
+`./run-2-workers.cmd`
 
 ## Configuration (.env)
 
@@ -59,6 +77,10 @@ WORKER_ID=transcode_myhost@1
 REDIS_URL=redis://localhost:6379/0
 S3_UPLOAD_CONCURRENCY=2
 MEDIA_LAYOUT=muxed # muxed | separated
+TRANSCODE_PIPELINE_MODE=adaptive # adaptive | fanout | sequential
+TRANSCODE_FANOUT_MAX_MINUTES=30
+TRANSCODE_UPLOAD_OVERLAP=true
+TRANSCODE_MAX_PARALLEL_UPLOADS=2
 ```
 
 ## Settings ใน DB (collection `settings`)
@@ -73,7 +95,7 @@ MEDIA_LAYOUT=muxed # muxed | separated
 
 1. **download (10%)** — Local โหลดจาก storage-node; S3 โหลดจาก `https://{originUrl}/{fileId}/{fileName}` — cache ไว้ retry
 2. **probe** — ขนาด/ความยาว/bitrate → คำนวณ resolutions เป้าหมาย; เมื่อ `MEDIA_LAYOUT=separated` จะดึง audio ที่ยังฝังใน original เป็น `{fileId}/audio_N.m4a` ก่อน
-3. **encode_{res} + upload_{res} (85%)** — ทีละ resolution: `muxed` จะคงเสียง AAC ใน MP4 แบบเดิม ส่วน `separated` จะสร้าง MP4 แบบ video-only → permanent S3 (`{fileId}/file_{res}.mp4`) → Media/Clone → ลบ local output ทันที; ถ้าไม่มีหรืออัพไม่สำเร็จ จึง fallback S3 temp + ingest ให้ worker-transfer ติดตั้ง
+3. **encode_{res} + upload_{res} (85%)** — adaptive GPU fanout ตามความยาว/คุณภาพ หรือ sequential เมื่อใช้ CPU; `muxed` จะคงเสียง AAC ใน MP4 แบบเดิม ส่วน `separated` จะสร้าง MP4 แบบ video-only → permanent S3 (`{fileId}/file_{res}.mp4`) → Media/Clone → ลบ local output ทันที; ถ้าไม่มีหรืออัพไม่สำเร็จ จึง fallback S3 temp + ingest ให้ worker-transfer ติดตั้ง
 4. **finish (100%)** — `file.metadata.highest` + clones
 
 ```

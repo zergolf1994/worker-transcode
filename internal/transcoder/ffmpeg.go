@@ -32,10 +32,11 @@ const (
 )
 
 var (
-	detectedEncoder string
-	gpuEnabled      bool
-	encoderDetected bool
-	encoderMu       sync.Mutex
+	detectedEncoder  string
+	gpuEnabled       bool
+	encoderDetected  bool
+	encoderForcedCPU bool
+	encoderMu        sync.Mutex
 )
 
 // SetGPUEnabled sets whether GPU encoding is allowed
@@ -47,6 +48,7 @@ func SetGPUEnabled(enabled bool) {
 	if gpuEnabled != enabled {
 		gpuEnabled = enabled
 		encoderDetected = false // re-detect on next call
+		encoderForcedCPU = false
 		if enabled {
 			log.Printf("🎮 GPU encoding enabled — will auto-detect on next encode")
 		} else {
@@ -103,6 +105,30 @@ func DetectEncoder() string {
 	encoderDetected = true
 	log.Printf("💻 No GPU encoder found — using CPU (libx264)")
 	return detectedEncoder
+}
+
+// ForceCPU makes the current process use CPU encoding for subsequent work.
+// Adaptive fanout calls this after a GPU batch fails so the fallback encodes
+// renditions one at a time instead of starting several libx264 encoders.
+func ForceCPU() {
+	encoderMu.Lock()
+	defer encoderMu.Unlock()
+	detectedEncoder = EncoderCPU
+	encoderDetected = true
+	encoderForcedCPU = true
+	log.Printf("💻 Encoder forced to CPU (libx264)")
+}
+
+// ResetForcedCPU lets the next job probe the GPU again after a per-job
+// fallback. Successful GPU detection remains cached during normal operation.
+func ResetForcedCPU() {
+	encoderMu.Lock()
+	defer encoderMu.Unlock()
+	if gpuEnabled && encoderForcedCPU {
+		detectedEncoder = ""
+		encoderDetected = false
+		encoderForcedCPU = false
+	}
 }
 
 // testEncoder tests if an encoder is available by running a quick encode
@@ -368,7 +394,7 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 		// If GPU encoder fails, retry with CPU
 		if encoder != EncoderCPU {
 			log.Printf("⚠️  GPU encode failed, retrying with CPU (libx264)...")
-			detectedEncoder = EncoderCPU // force CPU for subsequent encodes
+			ForceCPU()
 
 			cpuArgs := []string{
 				"-y",

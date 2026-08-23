@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"worker-transcode/internal/config"
 	"worker-transcode/internal/core/enums"
@@ -17,7 +16,6 @@ import (
 	"worker-transcode/internal/downloader"
 	"worker-transcode/internal/queue"
 	"worker-transcode/internal/transcoder"
-	"worker-transcode/internal/uploader"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -79,6 +77,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 
 	// GPU kill switch จาก setting (default เปิด — auto-detect เอง)
 	transcoder.SetGPUEnabled(gpuEnabledFromSetting(ctx))
+	// A GPU failure falls back to CPU only for this job. Probe the GPU again on
+	// the next job instead of leaving this worker process on CPU forever.
+	defer transcoder.ResetForcedCPU()
 
 	// ─── STEP 1: DOWNLOAD original จาก storage-node ───────────
 	originalMedia, err := findOriginalMedia(ctx, fileID)
@@ -194,144 +195,25 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		permanentS3, _ = resolveS3VideoStorage(ctx)
 	}
 	var tempS3 *models.Storage
-	resolveTemp := func() (*models.Storage, error) {
-		if tempS3 != nil {
-			return tempS3, nil
-		}
-		storage, resolveErr := resolveS3TempStorage(ctx)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		tempS3 = storage
-		return tempS3, nil
-	}
 	if permanentS3 == nil {
-		if _, err := resolveTemp(); err != nil {
+		tempS3, err = resolveS3TempStorage(ctx)
+		if err != nil {
 			return fmt.Errorf("no permanent S3 or S3 temp available: %v: %w", err, queue.ErrJobRequeue)
 		}
 	}
 
-	// ─── STEP 4: ENCODE + UPLOAD ต่อ resolution ───────────────
-	// Progress: 10 (download) + 85 (encode+upload เฉลี่ยตาม res) + 5 (finish)
-	perRes := 85.0 / float64(len(pending))
-	highest := 0
-
-	for idx, res := range pending {
-		if ctx.Err() != nil {
-			return context.Cause(ctx)
-		}
-
-		fileName := enums.ResolutionToFileName[res]
-		outputPath := filepath.Join(workDir, fileName)
-		shortTarget := enums.ResolutionToShortSide[res]
-		targetW, targetH := transcoder.GetScaleDimensions(videoInfo.Width, videoInfo.Height, shortTarget)
-		base := 10.0 + float64(idx)*perRes
-
-		// ── encode (retry resume skips only a finalized, full-duration MP4) ──
-		encodeStep := fmt.Sprintf("encode_%s", res)
-		if info, statErr := os.Stat(outputPath); statErr == nil && info.Size() > 0 {
-			validateErr := transcoder.ValidateEncodedOutput(outputPath, videoInfo.DurationF)
-			if validateErr == nil && config.AppConfig.MediaLayout == "separated" {
-				validateErr = transcoder.ValidateVideoOnlyOutput(outputPath)
-			}
-			if validateErr == nil {
-				utils.LogMain("⏭️  [%s] %sp already encoded and verified (retry resume) — skipping encode", slug, res)
-				completeStep(ctx, job.ID, encodeStep)
-			} else {
-				utils.LogMain("⚠️  [%s] Removing incomplete %sp retry output: %v", slug, res, validateErr)
-				if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
-					return fmt.Errorf("remove incomplete %sp output: %w", res, removeErr)
-				}
-				if err := encodeResolution(ctx, job, slug, res, encodeStep, originalPath, outputPath,
-					targetW, targetH, videoInfo, int(shortSide), base, perRes); err != nil {
-					return err
-				}
-			}
-		} else {
-			if err := encodeResolution(ctx, job, slug, res, encodeStep, originalPath, outputPath,
-				targetW, targetH, videoInfo, int(shortSide), base, perRes); err != nil {
-				return err
-			}
-		}
-
-		// ── upload → permanent S3 media; fallback S3 temp + ingest ──
-		uploadStep := fmt.Sprintf("upload_%s", res)
-		startStep(ctx, job.ID, uploadStep)
-
-		writeUp := stepThrottle(1)
-		logProgress := pctLogger64(slug, uploadStep)
-		onUploadProgress := func(done, total int64) {
-			logProgress(done, total)
-			if total > 0 {
-				pct := float64(done) / float64(total) * 100
-				if writeUp(pct) {
-					updateStepAndOverall(ctx, job.ID, uploadStep, pct, base+perRes*0.7+pct/100*perRes*0.3)
-				}
-			}
-		}
-
-		size := transcoder.GetFileSize(outputPath)
-		installedDirect := false
-		if permanentS3 != nil {
-			objectKey := fmt.Sprintf("%s/%s", fileID, fileName)
-			utils.LogMain("📤 [%s] Uploading %s → permanent S3 %s", slug, fileName, permanentS3.Name)
-			if uploadErr := uploader.UploadToS3(ctx, permanentS3, outputPath, objectKey, onUploadProgress); uploadErr != nil {
-				if cause := context.Cause(ctx); cause != nil {
-					return cause
-				}
-				utils.LogMain("⚠️  [%s] Permanent S3 upload failed: %v — falling back to Temp → Local", slug, uploadErr)
-			} else {
-				if err := createPermanentVideoMedia(
-					ctx, fileID, slug, res, fileName, objectKey, permanentS3,
-					size, targetW, targetH, videoInfo.DurationF,
-				); err != nil {
-					return fmt.Errorf("create permanent media %s: %w", fileName, err)
-				}
-				installedDirect = true
-
-				// Cache invalidation is disabled; content-node/CDN TTL controls
-				// freshness. Flip cacheInvalidationEnabled to restore this call.
-				if cacheInvalidationEnabled {
-					invalidatePlaylistCaches(ctx, fileID, slug)
-				}
-			}
-		}
-
-		if !installedDirect {
-			tempStorage, tempErr := resolveTemp()
-			if tempErr != nil {
-				return fmt.Errorf("no S3 temp fallback for %s: %v: %w", fileName, tempErr, queue.ErrJobRequeue)
-			}
-			objectKey := fmt.Sprintf("%s/%s_%s", time.Now().Format("2006-01-02"), fileID, fileName)
-			utils.LogMain("📤 [%s] Uploading %s → S3 temp %s", slug, fileName, tempStorage.Name)
-			if err := uploader.UploadToS3(ctx, tempStorage, outputPath, objectKey, onUploadProgress); err != nil {
-				return fmt.Errorf("upload %s to S3 temp: %w", fileName, err)
-			}
-			layout := config.AppConfig.MediaLayout
-			metadata := &models.MediaMetadata{Size: size, Width: targetW, Height: targetH, Duration: videoInfo.DurationF, MediaLayout: &layout}
-			if err := createTranscodeIngest(ctx, fileID, tempStorage, fileName, objectKey, res, metadata, size); err != nil {
-				return fmt.Errorf("create ingest %s: %w", fileName, err)
-			}
-		}
-		completeStep(ctx, job.ID, uploadStep)
-
-		if resInt, convErr := strconv.Atoi(res); convErr == nil && resInt > highest {
-			highest = resInt
-		}
-
-		// ลบ output ทันทีหลัง upload + media/cache เสร็จ คืนพื้นที่ก่อน
-		// encode resolution ถัดไป; ถ้าลบไม่ได้ให้หยุดเพื่อกัน disk เต็ม
-		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove uploaded output %s: %w", fileName, err)
-		}
-		utils.LogMain("🧹 [%s] Removed local %s after upload", slug, fileName)
-		models.VideoProcessModel.UpdateByID(ctx, job.ID, bson.M{"$push": bson.M{"completed": res}})
-		if installedDirect {
-			utils.LogMain("✅ [%s] %sp ready on permanent S3", slug, res)
-		} else {
-			utils.LogMain("✅ [%s] %sp done (ingest created — worker-transfer will install)", slug, res)
-		}
+	// ─── STEP 4: ADAPTIVE ENCODE + UPLOAD ─────────────────────
+	// CPU always stays sequential. GPU fanout decodes the original once. For
+	// long 720p+ inputs, 360p is encoded/published first while the remaining
+	// renditions fan out in a second decode pass.
+	tasks := makeRenditionTasks(pending, workDir, videoInfo)
+	targets := &uploadTargets{permanent: permanentS3, temp: tempS3}
+	if err := runAdaptivePipeline(
+		ctx, job, fileID, slug, originalPath, videoInfo, int(shortSide), tasks, targets,
+	); err != nil {
+		return err
 	}
+	highest := highestTaskResolution(tasks)
 
 	// ─── STEP 5: FINISH — ประทับ metadata.highest ─────────────
 	if h := highestCovered(ctx, fileID); h > highest {
@@ -345,35 +227,6 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 
 	success = true
 	utils.LogMain("✅ [%s] TRANSCODE COMPLETE (%v)", slug, pending)
-	return nil
-}
-
-func encodeResolution(ctx context.Context, job *models.VideoProcess, slug, res, encodeStep,
-	originalPath, outputPath string, targetW, targetH int, videoInfo *transcoder.VideoInfo,
-	shortSide int, base, perRes float64,
-) error {
-	startStep(ctx, job.ID, encodeStep)
-	utils.LogMain("🎬 [%s] Encoding %sp (%dx%d)...", slug, res, targetW, targetH)
-
-	write := stepThrottle(1)
-	logEncodeProgress := pctLogger(slug, encodeStep)
-	err := transcoder.EncodeResolution(ctx, originalPath, outputPath, targetW, targetH,
-		videoInfo.DurationF, videoInfo.VideoBitrate, shortSide,
-		config.AppConfig.MediaLayout != "separated", func(percent int) {
-			logEncodeProgress(percent)
-			if write(float64(percent)) {
-				// encode กิน 70% ของช่วง res นี้ upload อีก 30%
-				updateStepAndOverall(ctx, job.ID, encodeStep, float64(percent), base+float64(percent)/100*perRes*0.7)
-			}
-		})
-	if err != nil {
-		if ctx.Err() != nil {
-			return context.Cause(ctx)
-		}
-		return fmt.Errorf("encode %sp: %w", res, err)
-	}
-	completeStep(ctx, job.ID, encodeStep)
-	utils.LogMain("✅ [%s] Encoded %sp", slug, res)
 	return nil
 }
 
