@@ -43,6 +43,61 @@ func findOriginalMedia(ctx context.Context, fileID string) (*models.Media, error
 	return media, nil
 }
 
+// findTempOriginalIngest resolves a completed Original that is still retained
+// on an S3 Temp storage. Storage enable/status is intentionally ignored here:
+// disabling a destination must not make an existing source object unreadable.
+func findTempOriginalIngest(ctx context.Context, fileID string) (*models.Ingest, *models.Storage, error) {
+	cursor, err := models.StorageModel.FindRaw(ctx, bson.M{
+		"type":    enums.StorageTypeS3,
+		"accepts": bson.M{"$all": []string{enums.StorageAcceptTemp, enums.StorageAcceptVideo}},
+	}, options.Find().SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer cursor.Close(ctx)
+
+	storageIDs := make([]string, 0)
+	for cursor.Next(ctx) {
+		var storage models.Storage
+		if err := cursor.Decode(&storage); err == nil && storage.ID != "" {
+			storageIDs = append(storageIDs, storage.ID)
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(storageIDs) == 0 {
+		return nil, nil, fmt.Errorf("no S3 temp storage configured")
+	}
+
+	ingest, err := models.IngestModel.FindOne(ctx, bson.M{
+		"fileId":    fileID,
+		"fileName":  enums.FileNameOriginal,
+		"storageId": bson.M{"$in": storageIDs},
+		"status":    "completed",
+		"sourceType": bson.M{"$in": []string{
+			enums.IngestSourceTypeUpload,
+			enums.IngestSourceTypeProcessed,
+		}},
+		"deletedAt": bson.M{"$exists": false},
+	}, options.FindOne().SetSort(bson.D{{Key: "updatedAt", Value: -1}, {Key: "_id", Value: -1}}))
+	if err != nil {
+		return nil, nil, fmt.Errorf("retained temp original not found")
+	}
+	storage, err := models.StorageModel.FindByID(ctx, derefStr(ingest.StorageID))
+	if err != nil || storage.S3 == nil {
+		return nil, nil, fmt.Errorf("temp original storage not found")
+	}
+	return ingest, storage, nil
+}
+
+func ingestObjectKey(ingest *models.Ingest, fileID string) string {
+	if ingest != nil && ingest.Path != nil && strings.TrimSpace(*ingest.Path) != "" {
+		return strings.TrimSpace(*ingest.Path)
+	}
+	return fmt.Sprintf("%s/%s", fileID, enums.FileNameOriginal)
+}
+
 // hasVideoMedia checks medias collection globally (any storage) for this resolution.
 func hasVideoMedia(ctx context.Context, fileID, resolution string) bool {
 	count, _ := models.MediaModel.CountDocuments(ctx, bson.M{

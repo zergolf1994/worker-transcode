@@ -69,6 +69,73 @@ func VerifyS3Object(ctx context.Context, storage *models.Storage, objectKey stri
 	return verifyS3Object(ctx, client, bucket, fullKey, expectedSize)
 }
 
+// DownloadFromS3 downloads a staging object with the same credentials and
+// prefix rules used by uploads. The .part file is renamed only after the full
+// object is written so a retry never consumes a partial original.
+func DownloadFromS3(ctx context.Context, storage *models.Storage, objectKey, destPath string, onProgress func(downloaded, total int64)) error {
+	client, bucket, fullKey, endpoint, err := newS3Client(storage, objectKey)
+	if err != nil {
+		return err
+	}
+	result, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(fullKey),
+	})
+	if err != nil {
+		return fmt.Errorf("S3 GetObject: %w", err)
+	}
+	defer result.Body.Close()
+
+	total := aws.ToInt64(result.ContentLength)
+	log.Printf("📥 S3 Download: endpoint=%s bucket=%s key=%s size=%.2fMB",
+		endpoint, bucket, fullKey, float64(total)/1024/1024)
+	tmpPath := destPath + ".part"
+	out, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	removePartial := func() {
+		_ = out.Close()
+		_ = os.Remove(tmpPath)
+	}
+
+	var downloaded int64
+	buf := make([]byte, 1024*1024)
+	for {
+		n, readErr := result.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				removePartial()
+				return writeErr
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(downloaded, total)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			removePartial()
+			return readErr
+		}
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if total > 0 && downloaded != total {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("S3 size mismatch: expected %d, got %d", total, downloaded)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 func newS3Client(storage *models.Storage, objectKey string) (*s3.Client, string, string, string, error) {
 	if storage == nil || storage.S3 == nil || storage.S3.Endpoint == nil || strings.TrimSpace(*storage.S3.Endpoint) == "" {
 		return nil, "", "", "", fmt.Errorf("storage has no S3 endpoint")

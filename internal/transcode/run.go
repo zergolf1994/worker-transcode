@@ -16,6 +16,7 @@ import (
 	"worker-transcode/internal/downloader"
 	"worker-transcode/internal/queue"
 	"worker-transcode/internal/transcoder"
+	"worker-transcode/internal/uploader"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -81,18 +82,39 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 	// the next job instead of leaving this worker process on CPU forever.
 	defer transcoder.ResetForcedCPU()
 
-	// ─── STEP 1: DOWNLOAD original จาก storage-node ───────────
-	originalMedia, err := findOriginalMedia(ctx, fileID)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
+	// ─── STEP 1: DOWNLOAD original ─────────────────────────────
+	// Prefer the retained Temp Original. This avoids pulling the same large file
+	// back through storage-node after download/transfer has already staged it.
+	// If the Temp object is missing or unreadable, fall back to installed media.
+	tempIngest, tempStorage, tempErr := findTempOriginalIngest(ctx, fileID)
+	var originalMedia *models.Media
+	var sourceStorage *models.Storage
+	var expectedSize int64
+	useTemp := tempErr == nil
+	if useTemp {
+		expectedSize = tempIngest.Size
 	}
-	sourceStorage, err := models.StorageModel.FindByID(ctx, derefStr(originalMedia.StorageID))
-	if err != nil {
-		return fmt.Errorf("prepare: source storage not found: %w", err)
+	resolveInstalledSource := func() error {
+		var resolveErr error
+		originalMedia, resolveErr = findOriginalMedia(ctx, fileID)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		sourceStorage, resolveErr = models.StorageModel.FindByID(ctx, derefStr(originalMedia.StorageID))
+		if resolveErr != nil {
+			return fmt.Errorf("source storage not found: %w", resolveErr)
+		}
+		expectedSize = originalMediaSize(originalMedia)
+		return nil
+	}
+	if !useTemp {
+		if err := resolveInstalledSource(); err != nil {
+			return fmt.Errorf("prepare: no retained Temp Original and %w", err)
+		}
 	}
 
 	originalPath := filepath.Join(workDir, enums.FileNameOriginal)
-	if cachedOriginalValid(originalPath, originalMedia) {
+	if cachedOriginalValid(originalPath, expectedSize) {
 		utils.LogMain("📥 [%s] Original already cached — skipping download", slug)
 		completeStep(ctx, job.ID, "download")
 		updateOverallPercent(ctx, job.ID, 10)
@@ -100,24 +122,9 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 		os.Remove(originalPath)
 		startStep(ctx, job.ID, "download")
 
-		var sourceURL string
-		if sourceStorage.Type == enums.StorageTypeS3 {
-			sourceURL, err = sourceStorage.GetOriginObjectPathURL(originalMedia.ObjectPath())
-			if err != nil {
-				return fmt.Errorf("download: resolve S3 origin: %w", err)
-			}
-		} else {
-			hostPort := sourceStorage.GetHostPort()
-			if hostPort == "" {
-				return fmt.Errorf("download: source storage has no host")
-			}
-			sourceURL = fmt.Sprintf("http://%s/%s.mp4", hostPort, originalMedia.Slug)
-		}
-		utils.LogMain("📥 [%s] Downloading %s", slug, sourceURL)
-
 		write := stepThrottle(1)
 		logProgress := pctLogger64(slug, "download")
-		if err := downloader.DownloadURL(ctx, sourceURL, originalPath, func(done, total int64) {
+		onProgress := func(done, total int64) {
 			logProgress(done, total)
 			if total > 0 {
 				pct := float64(done) / float64(total) * 100
@@ -125,8 +132,44 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 					updateStepAndOverall(ctx, job.ID, "download", pct, pct*0.10)
 				}
 			}
-		}); err != nil {
-			return fmt.Errorf("download: %w", err)
+		}
+
+		downloaded := false
+		if useTemp {
+			objectKey := ingestObjectKey(tempIngest, fileID)
+			utils.LogMain("📥 [%s] Downloading retained Temp Original (key=%s)", slug, objectKey)
+			if tempDownloadErr := uploader.DownloadFromS3(
+				ctx, tempStorage, objectKey, originalPath, onProgress,
+			); tempDownloadErr == nil {
+				downloaded = true
+			} else {
+				utils.LogMain("⚠️  [%s] Temp Original unavailable: %v — falling back to installed media", slug, tempDownloadErr)
+				_ = os.Remove(originalPath)
+				if resolveErr := resolveInstalledSource(); resolveErr != nil {
+					return fmt.Errorf("download temp original: %v; fallback: %w", tempDownloadErr, resolveErr)
+				}
+			}
+		}
+
+		if !downloaded {
+			var sourceURL string
+			if sourceStorage.Type == enums.StorageTypeS3 {
+				var resolveErr error
+				sourceURL, resolveErr = sourceStorage.GetOriginObjectPathURL(originalMedia.ObjectPath())
+				if resolveErr != nil {
+					return fmt.Errorf("download: resolve S3 origin: %w", resolveErr)
+				}
+			} else {
+				hostPort := sourceStorage.GetHostPort()
+				if hostPort == "" {
+					return fmt.Errorf("download: source storage has no host")
+				}
+				sourceURL = fmt.Sprintf("http://%s/%s.mp4", hostPort, originalMedia.Slug)
+			}
+			utils.LogMain("📥 [%s] Downloading installed Original %s", slug, sourceURL)
+			if err := downloader.DownloadURL(ctx, sourceURL, originalPath, onProgress); err != nil {
+				return fmt.Errorf("download: %w", err)
+			}
 		}
 		completeStep(ctx, job.ID, "download")
 		updateOverallPercent(ctx, job.ID, 10)
@@ -231,12 +274,19 @@ func run(ctx context.Context, job *models.VideoProcess) error {
 }
 
 // cachedOriginalValid — ไฟล์ที่โหลดค้างไว้จากรอบก่อนใช้ได้ไหม (ขนาดตรง metadata)
-func cachedOriginalValid(path string, media *models.Media) bool {
+func cachedOriginalValid(path string, expected int64) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() == 0 {
 		return false
 	}
+	return expected == 0 || info.Size() == expected
+}
+
+func originalMediaSize(media *models.Media) int64 {
 	var expected int64
+	if media == nil {
+		return expected
+	}
 	if media.Metadata != nil {
 		switch v := media.Metadata.Size.(type) {
 		case int64:
@@ -249,7 +299,7 @@ func cachedOriginalValid(path string, media *models.Media) bool {
 			expected = int64(v)
 		}
 	}
-	return expected == 0 || info.Size() == expected
+	return expected
 }
 
 // highestCovered — resolution สูงสุดที่มี media หรือ ingest ค้างอยู่แล้ว
