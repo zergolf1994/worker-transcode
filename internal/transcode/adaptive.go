@@ -253,7 +253,7 @@ func runAdaptivePipeline(
 				return err
 			}
 		}
-		return uploadRenditionsConcurrent(ctx, job, fileID, slug, videoInfo, tasks, targets, progress)
+		return uploadRenditionsSequential(ctx, job, fileID, slug, videoInfo, tasks, targets, progress)
 
 	case "priority360":
 		var priority renditionTask
@@ -311,7 +311,7 @@ func runAdaptivePipeline(
 			return uploadErr
 		}
 		// Do not publish higher renditions before 360p is durable/playable.
-		return uploadRenditionsConcurrent(ctx, job, fileID, slug, videoInfo, rest, targets, progress)
+		return uploadRenditionsSequential(ctx, job, fileID, slug, videoInfo, rest, targets, progress)
 
 	default:
 		if shouldOverlapUploads(config.AppConfig.TranscodePipelineMode, config.AppConfig.TranscodeUploadOverlap) {
@@ -333,8 +333,8 @@ func runAdaptivePipeline(
 }
 
 // runPipelinedSequential keeps exactly one encoder active while completed
-// outputs upload in the background. The semaphore provides backpressure so a
-// slow S3 destination cannot accumulate an unbounded number of local files.
+// outputs upload in the background. Exactly one rendition may upload at a
+// time, preventing concurrent multipart streams from hitting S3 rate limits.
 // When firstUploadGate is non-nil, the first higher-quality upload waits until
 // the priority 360p upload has been published successfully.
 func runPipelinedSequential(
@@ -348,11 +348,8 @@ func runPipelinedSequential(
 	progress *adaptiveProgress,
 	firstUploadGate <-chan error,
 ) error {
-	maxUploads := config.AppConfig.MaxParallelUploads
-	if maxUploads < 1 {
-		maxUploads = 1
-	}
-	utils.LogMain("🔀 [%s] Sequential encode with upload overlap (max uploads=%d)", slug, maxUploads)
+	const maxUploads = 1
+	utils.LogMain("🔀 [%s] Sequential encode with upload overlap (uploads=1 at a time)", slug)
 
 	semaphore := make(chan struct{}, maxUploads)
 	errCh := make(chan error, len(tasks))
@@ -587,7 +584,7 @@ func ensureEncodedFanout(
 	return true, nil
 }
 
-func uploadRenditionsConcurrent(
+func uploadRenditionsSequential(
 	ctx context.Context,
 	job *models.VideoProcess,
 	fileID, slug string,
@@ -599,22 +596,9 @@ func uploadRenditionsConcurrent(
 	if len(tasks) == 0 {
 		return nil
 	}
-	errCh := make(chan error, len(tasks))
-	var wg sync.WaitGroup
+	utils.LogMain("📤 [%s] Upload queue: %d rendition(s), 1 at a time", slug, len(tasks))
 	for _, task := range tasks {
-		task := task
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := uploadRendition(ctx, job, fileID, slug, videoInfo, task, targets, progress); err != nil {
-				errCh <- err
-			}
-		}()
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
+		if err := uploadRendition(ctx, job, fileID, slug, videoInfo, task, targets, progress); err != nil {
 			return err
 		}
 	}
