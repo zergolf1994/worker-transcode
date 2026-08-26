@@ -61,6 +61,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	utils.CleanOldLogs()
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				utils.CleanOldLogs()
+			}
+		}
+	}()
+
 	hbDone := make(chan struct{})
 	go func() {
 		defer close(hbDone)

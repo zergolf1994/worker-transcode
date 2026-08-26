@@ -19,6 +19,46 @@ const maxLogResponse = int64(512 * 1024)
 
 var safeSlug = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// serveProcessLogBySlug exposes a process log directly at /log/{slug}.log.
+func serveProcessLogBySlug() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/log/")
+		if !strings.HasSuffix(name, ".log") || strings.Contains(name, "/") {
+			http.Error(w, "invalid log name", http.StatusBadRequest)
+			return
+		}
+		slug := strings.TrimSuffix(name, ".log")
+		logPath, ok := processLogPath(slug)
+		if !ok {
+			http.Error(w, "invalid log name", http.StatusBadRequest)
+			return
+		}
+		file, err := os.Open(logPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, "failed to read log", http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			http.Error(w, "failed to read log", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		http.ServeContent(w, r, name, info.ModTime(), file)
+	}
+}
+
 func serveProcessLog(group string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

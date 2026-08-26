@@ -19,7 +19,7 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 - **Auto Retry + Backoff** — fail → pending ใน doc เดิม (1m, 2m) ครบ 3 ครั้ง → failed ถาวร (ไฟล์ยังเล่นได้จาก original)
 - **Progress จริง** — เขียน % ลง DB แบบ throttle ทุก ~5% (download / encode_{res} / upload_{res}) — งาน encode ยาวเป็นชั่วโมง หน้า admin เห็นความคืบหน้า
 - **จบงาน** — อัปเดต `file.metadata.highest` เป็น resolution สูงสุด + กระจายไป cloned files (ป้ายคุณภาพให้ UI — enqueuer ตัดสิน "เคย transcode หรือยัง" จาก media/ingest จริง ไม่ใช่ field นี้)
-- **Log per job** — จบงาน → อัพ `logs/process/<slug>.log` ขึ้น S3 ที่ `logs/transcode/`
+- **Log per job** — เก็บ `logs/process/<slug>.log` ในเครื่อง 7 วันแล้วลบอัตโนมัติ (ไม่อัพโหลดขึ้น S3) เปิดดูได้ที่ `/log/<slug>.log`
 - **Live process log** — กด `View log` ใน Dashboard เพื่ออ่าน log เฉพาะเมื่อเปิด (refresh ทุก 1 วินาที, สูงสุดท้ายไฟล์ 512 KiB)
 
 ## Requirements

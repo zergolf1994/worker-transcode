@@ -36,11 +36,10 @@ import (
 //
 // Progress: download 10% → encode+upload 85% (เฉลี่ยตาม resolution) → 100
 
-// Run executes one claimed transcode job, then finalizes the per-process log.
+// Run executes one claimed transcode job. Per-process logs remain local and
+// are removed by the seven-day retention cleanup.
 func Run(jobCtx context.Context, job *models.VideoProcess) error {
-	err := run(jobCtx, job)
-	finalizeProcessLog(jobCtx, job, err)
-	return err
+	return run(jobCtx, job)
 }
 
 func run(ctx context.Context, job *models.VideoProcess) error {
