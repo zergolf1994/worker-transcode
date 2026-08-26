@@ -48,6 +48,9 @@ func TestBuildFanoutArgsUsesOneInputAndOneOutputPerRendition(t *testing.T) {
 		t.Fatalf("missing filter_complex in %v", args)
 	}
 	filter := args[filterIndex+1]
+	if !strings.Contains(filter, "setpts=PTS-STARTPTS") {
+		t.Fatalf("filter does not normalize input timestamps: %s", filter)
+	}
 	if !strings.Contains(filter, "split=3") {
 		t.Fatalf("filter does not split three ways: %s", filter)
 	}
@@ -73,5 +76,8 @@ func TestBuildFanoutArgsMapsOptionalAudioPerOutput(t *testing.T) {
 	}
 	if got := countArg(args, "-an"); got != 0 {
 		t.Fatalf("unexpected -an in muxed fanout args: %v", args)
+	}
+	if got := countArg(args, "asetpts=PTS-STARTPTS"); got != len(renditions) {
+		t.Fatalf("audio timestamp filter count = %d, want %d: %v", got, len(renditions), args)
 	}
 }

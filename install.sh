@@ -17,6 +17,10 @@ UNINSTALL=false
 DATABASE_URL=""
 DASHBOARD_PORT="8886"
 MEDIA_LAYOUT="muxed"
+TRANSCODE_PIPELINE_MODE="adaptive"
+TRANSCODE_FANOUT_MAX_MINUTES="30"
+TRANSCODE_UPLOAD_OVERLAP="true"
+TRANSCODE_MAX_PARALLEL_UPLOADS="2"
 
 APP_NAME="worker-transcode"
 APP_DIR="/opt/$APP_NAME"
@@ -37,6 +41,10 @@ while [[ $# -gt 0 ]]; do
         --mongodb-uri)       DATABASE_URL="$2"; shift 2 ;; # alias เดิม
         --port)              DASHBOARD_PORT="$2"; shift 2 ;;
         --media-layout)      MEDIA_LAYOUT="$2"; shift 2 ;;
+        --pipeline-mode)     TRANSCODE_PIPELINE_MODE="$2"; shift 2 ;;
+        --fanout-max-minutes) TRANSCODE_FANOUT_MAX_MINUTES="$2"; shift 2 ;;
+        --upload-overlap)    TRANSCODE_UPLOAD_OVERLAP="$2"; shift 2 ;;
+        --max-parallel-uploads) TRANSCODE_MAX_PARALLEL_UPLOADS="$2"; shift 2 ;;
         -h|--help)
             echo "Worker Transcode Installer"
             echo ""
@@ -49,6 +57,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --database-url URI   MongoDB connection string (DATABASE_URL)"
             echo "  --port PORT          Realtime monitor port (default: 8886; worker @1 only)"
             echo "  --media-layout MODE  muxed (legacy) or separated (video-only + audio media)"
+            echo "  --pipeline-mode MODE adaptive, fanout, or sequential (default: adaptive)"
+            echo "  --fanout-max-minutes NUM  Adaptive fanout threshold, 1-1440 (default: 30)"
+            echo "  --upload-overlap BOOL     Encode next CPU rendition during upload, true/false (default: true)"
+            echo "  --max-parallel-uploads NUM  Background uploads, 1-4 (default: 2)"
             echo "  -h, --help           Show this help"
             echo ""
             echo "Examples:"
@@ -70,6 +82,32 @@ done
 
 if [ "$MEDIA_LAYOUT" != "muxed" ] && [ "$MEDIA_LAYOUT" != "separated" ]; then
     print_error "--media-layout must be muxed or separated"
+    exit 1
+fi
+
+if [ "$TRANSCODE_PIPELINE_MODE" != "adaptive" ] && \
+   [ "$TRANSCODE_PIPELINE_MODE" != "fanout" ] && \
+   [ "$TRANSCODE_PIPELINE_MODE" != "sequential" ]; then
+    print_error "--pipeline-mode must be adaptive, fanout, or sequential"
+    exit 1
+fi
+
+if ! [[ "$TRANSCODE_FANOUT_MAX_MINUTES" =~ ^[0-9]+$ ]] || \
+   [ "$TRANSCODE_FANOUT_MAX_MINUTES" -lt 1 ] || \
+   [ "$TRANSCODE_FANOUT_MAX_MINUTES" -gt 1440 ]; then
+    print_error "--fanout-max-minutes must be an integer between 1 and 1440"
+    exit 1
+fi
+
+if [ "$TRANSCODE_UPLOAD_OVERLAP" != "true" ] && [ "$TRANSCODE_UPLOAD_OVERLAP" != "false" ]; then
+    print_error "--upload-overlap must be true or false"
+    exit 1
+fi
+
+if ! [[ "$TRANSCODE_MAX_PARALLEL_UPLOADS" =~ ^[0-9]+$ ]] || \
+   [ "$TRANSCODE_MAX_PARALLEL_UPLOADS" -lt 1 ] || \
+   [ "$TRANSCODE_MAX_PARALLEL_UPLOADS" -gt 4 ]; then
+    print_error "--max-parallel-uploads must be an integer between 1 and 4"
     exit 1
 fi
 
@@ -180,10 +218,10 @@ DATABASE_URL=$DATABASE_URL
 DASHBOARD_PORT=$DASHBOARD_PORT
 S3_UPLOAD_CONCURRENCY=2
 MEDIA_LAYOUT=$MEDIA_LAYOUT
-TRANSCODE_PIPELINE_MODE=adaptive
-TRANSCODE_FANOUT_MAX_MINUTES=30
-TRANSCODE_UPLOAD_OVERLAP=true
-TRANSCODE_MAX_PARALLEL_UPLOADS=2
+TRANSCODE_PIPELINE_MODE=$TRANSCODE_PIPELINE_MODE
+TRANSCODE_FANOUT_MAX_MINUTES=$TRANSCODE_FANOUT_MAX_MINUTES
+TRANSCODE_UPLOAD_OVERLAP=$TRANSCODE_UPLOAD_OVERLAP
+TRANSCODE_MAX_PARALLEL_UPLOADS=$TRANSCODE_MAX_PARALLEL_UPLOADS
 EOF
 
 print_status "Creating systemd service template..."

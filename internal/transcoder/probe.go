@@ -1,6 +1,7 @@
 package transcoder
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -28,13 +29,26 @@ func ValidateEncodedOutput(filePath string, expectedDuration float64) error {
 	if info.DurationF <= 0 {
 		return fmt.Errorf("output has no readable duration")
 	}
-	if expectedDuration > 0 {
-		tolerance := math.Max(2, expectedDuration*0.01)
-		if math.Abs(info.DurationF-expectedDuration) > tolerance {
-			return fmt.Errorf("duration incomplete: got %.2fs, expected %.2fs (tolerance %.2fs)", info.DurationF, expectedDuration, tolerance)
-		}
+	if err := validateDuration(info.DurationF, expectedDuration); err != nil {
+		return err
 	}
 	return nil
+}
+
+func validateDuration(actual, expected float64) error {
+	if expected <= 0 {
+		return nil
+	}
+	tolerance := math.Max(2, expected*0.01)
+	delta := actual - expected
+	if math.Abs(delta) <= tolerance {
+		return nil
+	}
+	direction := "too long"
+	if delta < 0 {
+		direction = "too short"
+	}
+	return fmt.Errorf("duration %s: got %.2fs, expected %.2fs (tolerance %.2fs)", direction, actual, expected, tolerance)
 }
 
 // ValidateVideoOnlyOutput rejects retry artifacts created previously in muxed
@@ -55,81 +69,100 @@ func ValidateVideoOnlyOutput(filePath string) error {
 
 // VideoInfo contains video metadata from ffprobe
 type VideoInfo struct {
-	Width        int64
-	Height       int64
-	Duration     int64   // in seconds
-	DurationF    float64 // duration in seconds (float)
-	Codec        string
-	VideoBitrate int64 // video bitrate in kbps
+	Width          int64
+	Height         int64
+	Duration       int64   // in seconds
+	DurationF      float64 // primary video-stream duration in seconds (format fallback)
+	FormatDuration float64 // whole-container duration; may include longer audio
+	StartTime      float64 // primary video-stream start timestamp
+	Codec          string
+	VideoBitrate   int64 // video bitrate in kbps
+}
+
+type videoProbeResult struct {
+	Streams []struct {
+		Width     int64  `json:"width"`
+		Height    int64  `json:"height"`
+		Duration  string `json:"duration"`
+		StartTime string `json:"start_time"`
+		CodecName string `json:"codec_name"`
+		BitRate   string `json:"bit_rate"`
+	} `json:"streams"`
+	Format struct {
+		Duration string `json:"duration"`
+	} `json:"format"`
+}
+
+func parseProbeFloat(value string) float64 {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "N/A" {
+		return 0
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func parseVideoProbe(output []byte) (*VideoInfo, error) {
+	var probe videoProbeResult
+	if err := json.Unmarshal(output, &probe); err != nil {
+		return nil, fmt.Errorf("decode ffprobe JSON: %w", err)
+	}
+	if len(probe.Streams) == 0 {
+		return nil, fmt.Errorf("no readable primary video stream")
+	}
+
+	stream := probe.Streams[0]
+	if stream.Width <= 0 || stream.Height <= 0 {
+		return nil, fmt.Errorf("invalid primary video dimensions: %dx%d", stream.Width, stream.Height)
+	}
+
+	formatDuration := parseProbeFloat(probe.Format.Duration)
+	videoDuration := parseProbeFloat(stream.Duration)
+	if videoDuration <= 0 {
+		videoDuration = formatDuration
+	}
+	info := &VideoInfo{
+		Width:          stream.Width,
+		Height:         stream.Height,
+		Duration:       int64(videoDuration),
+		DurationF:      videoDuration,
+		FormatDuration: formatDuration,
+		StartTime:      parseProbeFloat(stream.StartTime),
+		Codec:          strings.TrimSpace(stream.CodecName),
+	}
+	if bitrate := parseProbeFloat(stream.BitRate); bitrate > 0 {
+		info.VideoBitrate = int64(bitrate) / 1000
+	}
+	return info, nil
 }
 
 // ProbeVideoInfo extracts width, height, duration, and codec from a video file
 func ProbeVideoInfo(filePath string) (*VideoInfo, error) {
-	info := &VideoInfo{}
-
-	// Get width and height
+	// One JSON probe keeps all values from the same stream selection and also
+	// preserves stderr. Previously four independent probes discarded the real
+	// decoder/demuxer error and compared video-only outputs with format.duration
+	// (which can be longer because of audio).
 	cmd := exec.Command("ffprobe",
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height",
-		"-of", "csv=s=x:p=0",
+		"-show_entries", "stream=width,height,duration,start_time,codec_name,bit_rate:format=duration",
+		"-of", "json",
 		filePath,
 	)
-	output, err := cmd.Output()
-	if err == nil {
-		parts := strings.Split(strings.TrimSpace(string(output)), "x")
-		if len(parts) == 2 {
-			w, _ := strconv.ParseInt(parts[0], 10, 64)
-			h, _ := strconv.ParseInt(parts[1], 10, 64)
-			info.Width = w
-			info.Height = h
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = "no diagnostic output"
 		}
+		return nil, fmt.Errorf("ffprobe video stream: %w: %s", err, detail)
 	}
-
-	// Get duration
-	cmd = exec.Command("ffprobe",
-		"-v", "error",
-		"-show_entries", "format=duration",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		filePath,
-	)
-	output, err = cmd.Output()
-	if err == nil {
-		dur, _ := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
-		info.Duration = int64(dur)
-		info.DurationF = dur
-	}
-
-	// Get codec
-	cmd = exec.Command("ffprobe",
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "stream=codec_name",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		filePath,
-	)
-	output, err = cmd.Output()
-	if err == nil {
-		info.Codec = strings.TrimSpace(string(output))
-	}
-
-	// Get video bitrate
-	cmd = exec.Command("ffprobe",
-		"-v", "error",
-		"-select_streams", "v:0",
-		"-show_entries", "stream=bit_rate",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		filePath,
-	)
-	output, err = cmd.Output()
-	if err == nil {
-		brStr := strings.TrimSpace(string(output))
-		if brStr != "" && brStr != "N/A" {
-			br, _ := strconv.ParseInt(brStr, 10, 64)
-			if br > 0 {
-				info.VideoBitrate = br / 1000 // bps → kbps
-			}
-		}
+	info, err := parseVideoProbe(output)
+	if err != nil {
+		return nil, err
 	}
 
 	// Fallback: estimate video bitrate from file size
@@ -139,10 +172,6 @@ func ProbeVideoInfo(filePath string) (*VideoInfo, error) {
 			totalBitrateKbps := float64(fileInfo.Size()) * 8 / info.DurationF / 1000
 			info.VideoBitrate = int64(totalBitrateKbps * 0.85) // ~15% audio/overhead
 		}
-	}
-
-	if info.Width == 0 || info.Height == 0 {
-		return nil, fmt.Errorf("failed to probe video dimensions")
 	}
 
 	return info, nil

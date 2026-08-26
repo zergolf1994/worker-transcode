@@ -109,9 +109,9 @@ func buildFanoutArgs(
 	}
 	filterParts := make([]string, 0, len(renditions)+1)
 	if len(renditions) == 1 {
-		filterParts = append(filterParts, fmt.Sprintf("[0:v:0]null%s", inputLabels[0]))
+		filterParts = append(filterParts, fmt.Sprintf("[0:v:0]setpts=PTS-STARTPTS%s", inputLabels[0]))
 	} else {
-		filterParts = append(filterParts, fmt.Sprintf("[0:v:0]split=%d%s", len(renditions), strings.Join(inputLabels, "")))
+		filterParts = append(filterParts, fmt.Sprintf("[0:v:0]setpts=PTS-STARTPTS,split=%d%s", len(renditions), strings.Join(inputLabels, "")))
 	}
 	for i, rendition := range renditions {
 		filterParts = append(filterParts, fmt.Sprintf(
@@ -134,7 +134,7 @@ func buildFanoutArgs(
 		args = append(args, getHLSGOPArgs()...)
 		args = append(args, "-pix_fmt", "yuv420p")
 		if includeAudio {
-			args = append(args, "-c:a", "aac", "-b:a", getAudioBitrate(shortSide), "-ac", "2", "-ar", "48000")
+			args = append(args, "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", getAudioBitrate(shortSide), "-ac", "2", "-ar", "48000")
 		} else {
 			args = append(args, "-an")
 		}

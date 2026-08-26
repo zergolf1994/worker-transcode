@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"worker-transcode/internal/core/enums"
@@ -139,15 +140,71 @@ func RetryOrFail(ctx context.Context, job *models.VideoProcess, errMsg string, c
 
 	// terminal — mark job failed; file/media are left as-is (still playable
 	// from S3 temp path), admin retries via the dashboard
+	now := time.Now()
+	set := bson.M{
+		"status":        enums.ProcessStatusFailed,
+		"error":         errMsg,
+		"errorCategory": category,
+	}
+	// Progress updates happen after the job was claimed, so job.Timeline can be
+	// stale. Read the current document and close every active step to keep the
+	// dashboard from showing a terminal job as Running forever.
+	if current, findErr := models.VideoProcessModel.FindByID(ctx, job.ID); findErr == nil {
+		for key, value := range failedTimelineFields(current.Timeline, now) {
+			set[key] = value
+		}
+	}
 	_, err = models.VideoProcessModel.FindByIDAndUpdate(ctx, job.ID, bson.M{
-		"$set": bson.M{
-			"status":        enums.ProcessStatusFailed,
-			"error":         errMsg,
-			"errorCategory": category,
-		},
+		"$set": set,
 		"$inc": bson.M{"retryCount": 1},
+		// Keep workerId/claimedAt as terminal audit metadata. Slot accounting only
+		// counts processing jobs; removing these would hide the failing worker in
+		// Admin without releasing any additional capacity.
+		"$unset": bson.M{"nextRetryAt": ""},
 	})
 	return false, err
+}
+
+func failedTimelineFields(timeline interface{}, endedAt time.Time) bson.M {
+	fields := bson.M{}
+	var entries bson.D
+	switch value := timeline.(type) {
+	case bson.D:
+		entries = value
+	case bson.M:
+		for key, step := range value {
+			entries = append(entries, bson.E{Key: key, Value: step})
+		}
+	case map[string]interface{}:
+		for key, step := range value {
+			entries = append(entries, bson.E{Key: key, Value: step})
+		}
+	default:
+		return fields
+	}
+
+	for _, entry := range entries {
+		status := ""
+		switch step := entry.Value.(type) {
+		case bson.D:
+			for _, field := range step {
+				if field.Key == "status" {
+					status, _ = field.Value.(string)
+					break
+				}
+			}
+		case bson.M:
+			status, _ = step["status"].(string)
+		case map[string]interface{}:
+			status, _ = step["status"].(string)
+		}
+		if status != enums.StepStatusProcessing {
+			continue
+		}
+		fields[fmt.Sprintf("timeline.%s.status", entry.Key)] = enums.StepStatusFailed
+		fields[fmt.Sprintf("timeline.%s.endedAt", entry.Key)] = endedAt
+	}
+	return fields
 }
 
 // Release returns a claimed job to the queue (processing → pending),

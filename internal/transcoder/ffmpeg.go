@@ -331,7 +331,10 @@ func getHLSGOPArgs() []string {
 // srcBitrateKbps/srcShortSide: original file's video bitrate and short side for dynamic capping
 func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW, targetH int, totalDuration float64, srcBitrateKbps int64, srcShortSide int, includeAudio bool, onProgress func(percent int)) error {
 	encoder := DetectEncoder()
-	scaleFilter := fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2", targetW, targetH)
+	// Some legacy MP4/MPEG-TS inputs start at a large positive PTS. Without
+	// rebasing, that offset becomes empty time at the beginning of the output
+	// and can nearly double its reported duration.
+	scaleFilter := fmt.Sprintf("setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2", targetW, targetH)
 
 	// Determine short side for per-resolution settings
 	shortSide := targetH
@@ -378,7 +381,7 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 	args = append(args, "-pix_fmt", "yuv420p")
 
 	if includeAudio {
-		args = append(args, "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
+		args = append(args, "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
 	} else {
 		args = append(args, "-an")
 	}
@@ -412,7 +415,7 @@ func EncodeResolution(ctx context.Context, inputPath, outputPath string, targetW
 			cpuArgs = append(cpuArgs, getHLSGOPArgs()...)
 			cpuArgs = append(cpuArgs, "-vf", scaleFilter)
 			if includeAudio {
-				cpuArgs = append(cpuArgs, "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
+				cpuArgs = append(cpuArgs, "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", audioBitrate, "-ac", "2", "-ar", "48000")
 			} else {
 				cpuArgs = append(cpuArgs, "-an")
 			}

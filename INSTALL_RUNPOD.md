@@ -19,7 +19,7 @@ GPU, สร้าง Template, ตั้งค่า Secret, เปิดหล�
 | Worker Count | `1` |
 | Container Disk | `100 GB` |
 | Network Volume | ไม่จำเป็นสำหรับการทดลอง |
-| Image | `nvidia/cuda:12.8.1-runtime-ubuntu24.04` |
+| Image | `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` (แนะนำสำหรับ SSH) |
 | HTTP Port | `8886/http` เฉพาะเมื่อต้องการเปิด Dashboard |
 | Media Layout | `separated` |
 
@@ -75,28 +75,47 @@ DATABASE_URL={{ RUNPOD_SECRET_vdohide_database_url }}
 
 หรือกดไอคอนรูปกุญแจในหน้า Environment Variables แล้วเลือก Secret จาก UI
 
-## 3. สร้าง Pod Template
+## 3. เลือก Official Runpod PyTorch Template
 
-1. ไปที่ **Templates**
-2. กด **New Template**
-3. ตั้งชื่อ เช่น `vdohide-transcode`
-4. เลือก Template type เป็น Pod/ไม่ใช่ Serverless
-5. ตั้ง Container Image เป็น:
+วิธีที่แนะนำสำหรับเริ่มต้นคือใช้ Official Runpod PyTorch Template เพราะเตรียม
+`/start.sh`, SSH และ Web Terminal ไว้แล้ว แม้ worker ไม่ได้ใช้ PyTorch แต่ช่วยลดปัญหา
+การเข้า Pod ในช่วงติดตั้ง เมื่อระบบนิ่งแล้วจึงค่อยเปลี่ยนเป็น CUDA image แบบเล็ก
+
+ก่อน Deploy ให้เพิ่ม SSH public key ที่ **Runpod Settings → SSH Public Keys** ถ้าเพิ่ม
+หลัง Pod ถูกสร้าง Runpod จะไม่ inject key ให้ Pod เดิมอัตโนมัติ
+
+1. ไปที่ **Pods** แล้วกด **Deploy**
+2. กด **Change template**
+3. เลือก Official **Runpod PyTorch** โดยตรง ไม่ใช่เพียงสร้าง Custom Template แล้วคัดลอกชื่อ image
+4. ตรวจ image:
+
+```text
+runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+```
+
+5. เปิด **SSH terminal access**
+6. ปิด **Start Jupyter notebook** เพราะ worker ไม่ได้ใช้
+7. ตั้ง Container Disk เป็น `100 GB`
+8. เพิ่ม HTTP port `8886/http` สำหรับ Dashboard
+9. เพิ่ม Environment Variables ตามตารางด้านล่าง
+
+### ทางเลือก: Custom CUDA Template
+
+หากไม่ต้องการ SSH/Jupyter และต้องการ image เล็กกว่า สามารถสร้าง Pod Template ด้วย:
 
 ```text
 nvidia/cuda:12.8.1-runtime-ubuntu24.04
 ```
 
-6. ตั้ง Container Disk เป็น `100 GB`
-7. ไม่ต้องเพิ่ม Network Volume ในรอบแรก
-8. เพิ่ม port `8886/http` เฉพาะกรณีต้องใช้หน้า Dashboard
-9. เพิ่ม Environment Variables ตามตารางด้านล่าง
+Custom Template ต้องเพิ่ม `22/tcp`, ติดตั้ง/เปิด `openssh-server` และนำ `$PUBLIC_KEY`
+ใส่ `/root/.ssh/authorized_keys` เองหากต้องการ Full SSH
 
 ### Environment Variables
 
 | Key | Value | หมายเหตุ |
 |---|---|---|
 | `DATABASE_URL` | `{{ RUNPOD_SECRET_vdohide_database_url }}` | จำเป็น |
+| `NVIDIA_DRIVER_CAPABILITIES` | `video,compute,utility` | mount NVENC/NVDEC, CUDA และ `nvidia-smi` เข้า container |
 | `WORKER_COUNT` | `1` | เริ่มหนึ่ง process ต่อ GPU แล้ว benchmark ก่อนเพิ่ม |
 | `MEDIA_LAYOUT` | `separated` | ให้ตรงกับระบบปัจจุบัน |
 | `S3_UPLOAD_CONCURRENCY` | `2` | เป็น concurrency ต่อไฟล์; adaptive mode อาจ upload หลายไฟล์พร้อมกัน |
@@ -106,6 +125,15 @@ nvidia/cuda:12.8.1-runtime-ubuntu24.04
 | `TRANSCODE_FANOUT_MAX_MINUTES` | `30` | ความยาวสูงสุดที่ GPU fanout ทุก resolution พร้อมกัน |
 | `TRANSCODE_UPLOAD_OVERLAP` | `true` | adaptive CPU encode ตัวถัดไประหว่าง upload ตัวก่อนหน้า |
 | `TRANSCODE_MAX_PARALLEL_UPLOADS` | `2` | จำกัด uploads เบื้องหลังและทำ backpressure เมื่อ S3 ช้า |
+
+ต้องตั้ง `NVIDIA_DRIVER_CAPABILITIES` ใน **Runpod Template** ก่อนสร้าง Pod เพราะ NVIDIA
+Container Runtime อ่านค่านี้ตอนสร้าง container เพื่อเลือก driver libraries ที่จะ mount
+เข้ามา การใส่ภายหลังใน `/opt/worker-transcode/.env` ไม่สามารถเพิ่ม libraries ที่ไม่ได้
+ถูก mount ตอนเริ่ม container ได้
+
+ค่า `all` ใช้งานได้เช่นกัน แต่เปิด graphics/display capabilities ที่ worker นี้ไม่ใช้
+ค่าที่เจาะจงและแนะนำจึงเป็น `video,compute,utility`: `video` สำหรับ NVENC/NVDEC,
+`compute` สำหรับ CUDA และ `utility` สำหรับ `nvidia-smi`/NVML
 
 ไม่จำเป็นต้องตั้ง `WORKER_ID` ใน Template เพราะ startup command จะสร้าง ID แยกให้
 แต่ละ process โดยใช้ `RUNPOD_POD_ID`
@@ -124,6 +152,13 @@ set -Eeuo pipefail
 
 app_dir=/opt/worker-transcode
 worker_count=${WORKER_COUNT:-1}
+
+# Official Runpod PyTorch ใช้ /start.sh เปิด SSH/Web Terminal ถ้า override
+# Docker Start Command ต้องเรียก service เดิมขึ้นมาก่อนเปิด worker
+if [ -x /start.sh ]; then
+  /start.sh &
+  sleep 5
+fi
 
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -185,13 +220,186 @@ exit "$exit_status"
 ไม่ต้องดูแล custom Docker image เมื่อการตั้งค่าคงที่แล้วจึงค่อยสร้าง image ที่ติดตั้ง
 FFmpeg และ binary ไว้ล่วงหน้า
 
+### ติดตั้งผ่าน SSH ใน Pod ที่เปิดอยู่แล้ว
+
+ถ้า Deploy Official Runpod PyTorch แล้วเข้า SSH/PuTTY ได้ แต่ยังไม่ได้กำหนด Docker
+Start Command ให้ติดตั้งและทดสอบด้วยวิธีนี้ก่อน **อย่ารัน `~/install.sh` ของ image**
+เพราะไม่ใช่ installer ของ repository และ `install.sh` ของ repository ใช้ systemd
+ซึ่งไม่เหมาะกับ container
+
+#### กรณีเผลอรัน `install.sh` แล้วพบ systemd error
+
+ถ้า installer จบด้วยข้อความต่อไปนี้:
+
+```text
+System has not been booted with systemd as init system (PID 1). Can't operate.
+Failed to connect to bus: Host is down
+```
+
+ไม่ต้องรัน installer ซ้ำ ขั้นตอนก่อนเกิด error ได้ติดตั้ง FFmpeg, ดาวน์โหลด binary ไปที่
+`/opt/worker-transcode/worker-transcode` และสร้าง `.env` แล้ว แต่ `--count` ยังไม่ได้
+เปิด workers เพราะคำสั่งล้มก่อนถึงขั้น start service นอกจากนี้ worker เดิมที่เคยเปิดด้วย
+`nohup` อาจยังทำงานอยู่ เพราะ installer พยายามหยุดเฉพาะ systemd services
+
+หยุด worker เดิมแบบ graceful แล้วตรวจว่าไม่เหลือ process:
+
+```bash
+pkill -TERM -f '[w]orker-transcode' || true
+sleep 3
+pgrep -af '[w]orker-transcode' || echo 'No workers running'
+```
+
+จากนั้นตรวจ `/opt/worker-transcode/.env` แล้วเปิด workers ด้วยคำสั่งในหัวข้อด้านล่าง
+ได้ทันที ไม่ต้องใช้ `systemctl`
+
+ติดตั้ง dependencies และดาวน์โหลด release ล่าสุด:
+
+```bash
+set -Eeuo pipefail
+
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  ca-certificates curl ffmpeg
+
+install -d /opt/worker-transcode
+cd /opt/worker-transcode
+
+curl -fsSL \
+  https://github.com/zergolf1994/worker-transcode/releases/latest/download/linux \
+  -o worker-transcode
+
+chmod +x worker-transcode
+```
+
+ตรวจ GPU, driver libraries และ NVENC จริง:
+
+```bash
+nvidia-smi
+ldconfig -p | grep -E 'libnvidia-encode|libnvcuvid'
+ffmpeg -hide_banner -encoders 2>/dev/null | grep h264_nvenc
+
+ffmpeg -hide_banner -loglevel error \
+  -f lavfi -i color=c=black:s=256x256:d=1:r=25 \
+  -pix_fmt yuv420p -c:v h264_nvenc \
+  -frames:v 1 -f null -
+```
+
+ตรวจว่า Database Secret จาก Template ถูกส่งเข้ามาแล้ว:
+
+```bash
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo 'DATABASE_URL is configured'
+else
+  echo 'ERROR: DATABASE_URL is missing'
+fi
+```
+
+สร้าง `.env` จาก Environment Variables ของ Pod โดยไม่แสดง MongoDB URI บนหน้าจอ:
+
+```bash
+cd /opt/worker-transcode
+umask 077
+
+printf '%s\n' \
+  "DATABASE_URL=${DATABASE_URL:?DATABASE_URL is required}" \
+  "REDIS_URL=${REDIS_URL:-${RADIS_URL:-}}" \
+  "DASHBOARD_PORT=${DASHBOARD_PORT:-8886}" \
+  "S3_UPLOAD_CONCURRENCY=${S3_UPLOAD_CONCURRENCY:-2}" \
+  "MEDIA_LAYOUT=${MEDIA_LAYOUT:-separated}" \
+  "TRANSCODE_PIPELINE_MODE=${TRANSCODE_PIPELINE_MODE:-adaptive}" \
+  "TRANSCODE_FANOUT_MAX_MINUTES=${TRANSCODE_FANOUT_MAX_MINUTES:-30}" \
+  "TRANSCODE_UPLOAD_OVERLAP=${TRANSCODE_UPLOAD_OVERLAP:-true}" \
+  "TRANSCODE_MAX_PARALLEL_UPLOADS=${TRANSCODE_MAX_PARALLEL_UPLOADS:-2}" \
+  > .env
+```
+
+#### แยกฐานข้อมูล Test และ Production
+
+โปรแกรมใช้ `DATABASE_URL` เป็นตัวเลือกฐานข้อมูลจริง ตัวแปรเช่น `NODE_ENV=test`,
+`APP_ENV=test` หรือการเติมคำว่า test ใน `WORKER_ID` ไม่ได้แยก environment ให้
+อัตโนมัติ และ URI ควรระบุชื่อฐานข้อมูลชัดเจน เช่น:
+
+```env
+DATABASE_URL=mongodb+srv://USER:PASSWORD@HOST/vdohide_test?retryWrites=true&w=majority
+```
+
+Runpod Template จะ inject Environment Variables เข้า container ก่อนโปรแกรมอ่าน `.env`
+และ `godotenv.Load()` จะไม่เขียนทับตัวแปรที่มีอยู่แล้ว ดังนั้นถ้า Template ยังมี
+`DATABASE_URL` ของ production ค่าใน `.env` ของ test จะไม่ถูกใช้ เวลารันด้วยวิธี SSH
+ด้านล่างจึงลบค่าที่ inherit จาก Template ออกจาก process เพื่อบังคับให้โหลด `.env`
+
+เปรียบเทียบค่าโดยไม่แสดง MongoDB URI:
+
+```bash
+cd /opt/worker-transcode
+
+printf '%s' "${DATABASE_URL:-}" | sha256sum
+sed -n 's/^DATABASE_URL=//p' .env | sha256sum
+```
+
+ถ้า hash ต่างกัน แสดงว่า Runpod environment และ `.env` ชี้คนละฐานข้อมูล สำหรับการ
+ตั้งค่าถาวรให้เปลี่ยน `DATABASE_URL` ใน Runpod Template เป็น Secret ของ environment
+ที่ต้องการแล้ว Restart/Redeploy Pod ด้วย
+
+เปิดสอง workers เบื้องหลัง โดย `@1` เป็นเจ้าของ Dashboard และ `@2` รับงานโดยไม่เปิด
+port ซ้ำ:
+
+```bash
+cd /opt/worker-transcode
+mkdir -p logs
+worker_host=${RUNPOD_POD_ID:-$(hostname)}
+
+for worker_number in 1 2; do
+  nohup env \
+    -u DATABASE_URL \
+    -u REDIS_URL \
+    -u RADIS_URL \
+    WORKER_ID="transcode_runpod-${worker_host}@${worker_number}" \
+    ./worker-transcode \
+    > "logs/worker-${worker_number}.log" 2>&1 &
+
+  echo $! > "worker-${worker_number}.pid"
+  echo "Started worker @${worker_number}, PID $(cat worker-${worker_number}.pid)"
+done
+```
+
+ตรวจ process และดู log พร้อมกัน:
+
+```bash
+for worker_number in 1 2; do
+  worker_pid=$(cat "worker-${worker_number}.pid")
+  ps -fp "$worker_pid"
+done
+
+tail -F logs/worker-1.log logs/worker-2.log
+```
+
+กด `Ctrl+C` เพื่อออกจาก `tail` โดย workers ยังทำงานต่อ หากต้องการหยุดทั้งสองอย่าง
+graceful เพื่อคืนงานเข้าคิว:
+
+```bash
+cd /opt/worker-transcode
+
+for worker_number in 1 2; do
+  pid_file="worker-${worker_number}.pid"
+  if [ -f "$pid_file" ]; then
+    kill -TERM "$(cat "$pid_file")" 2>/dev/null || true
+  fi
+done
+```
+
+`nohup` ทำให้ worker อยู่ต่อหลังปิด PuTTY แต่ไม่เปิดใหม่เองหลัง Pod restart เมื่อตรวจ
+จนมั่นใจแล้วให้นำ Docker Start Command ด้านบนไปใส่ Template แล้ว Redeploy เพื่อให้
+ติดตั้ง release ล่าสุดและเปิด workers อัตโนมัติทุกครั้ง
+
 ## 5. Deploy Pod
 
 1. ไปที่ **Pods** แล้วกด **Deploy**
 2. เลือก GPU ที่ต้องการ
 3. ตั้ง **GPU Count = 1**
 4. ตรวจจำนวน vCPU และ RAM ของ host
-5. เลือก Template `vdohide-transcode`
+5. เลือก Official Runpod PyTorch Template ที่ตั้งค่า SSH, Environment Variables และ
+   Docker Start Command ตามข้อ 3-4 แล้ว
 6. ตรวจ Container Disk ว่าเป็น `100 GB`
 7. กด Deploy
 
@@ -219,13 +427,16 @@ Starting Worker Transcode ... [Worker: transcode_runpod-...@2]
 ถ้าเปิด terminal เข้า Pod ได้ ให้ตรวจ:
 
 ```bash
+echo "$NVIDIA_DRIVER_CAPABILITIES"
 nvidia-smi
+ldconfig -p | grep -E 'libnvidia-encode|libnvcuvid'
 ffmpeg -hide_banner -encoders | grep nvenc
 ffmpeg -hide_banner -hwaccels
 ps aux | grep '[w]orker-transcode'
 ```
 
-ควรพบ `h264_nvenc`, `cuda` และจำนวน process เท่ากับ `WORKER_COUNT`
+ควรเห็นค่า `video,compute,utility`, พบ `libnvidia-encode.so.1`, `libnvcuvid.so.1`,
+`h264_nvenc`, `cuda` และจำนวน process เท่ากับ `WORKER_COUNT`
 
 ## 7. ตั้งค่าใน MongoDB
 
@@ -345,9 +556,14 @@ local disk สำหรับไฟล์วิดีโอขนาดใหญ
 
 ```bash
 nvidia-smi
+echo "$NVIDIA_DRIVER_CAPABILITIES"
 ldconfig -p | grep -E 'libnvidia-encode|libnvcuvid'
 ffmpeg -hide_banner -encoders | grep h264_nvenc
 ```
+
+ถ้าค่าว่างหรือไม่มี `video` ให้แก้ Environment Variables ใน Runpod Template เป็น
+`NVIDIA_DRIVER_CAPABILITIES=video,compute,utility` แล้วสร้าง/Restart Pod ใหม่ การ export
+ตัวแปรหลัง container เริ่มแล้วไม่สามารถ mount driver libraries ย้อนหลังได้
 
 และดู startup log ว่าการทดสอบ NVENC ผ่านหรือไม่ หากใช้ RTX 5090 หรือ RTX PRO
 Blackwell ให้ใช้ host driver และ CUDA-compatible image รุ่นใหม่พอ
@@ -426,3 +642,4 @@ TRANSCODE_PIPELINE_MODE=sequential
 - [Runpod GPU pricing](https://www.runpod.io/pricing)
 - [NVIDIA FFmpeg GPU acceleration](https://developer.nvidia.com/ffmpeg)
 - [NVIDIA Video Encode and Decode support matrix](https://developer.nvidia.com/video-encode-decode-support-matrix)
+- [NVIDIA Container Toolkit: Driver capabilities](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html#driver-capabilities)

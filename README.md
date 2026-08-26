@@ -39,6 +39,11 @@ Queue-based transcode worker สำหรับ [VdoHide](https://vdohide.xyz) �
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zergolf1994/worker-transcode/main/install.sh | sudo -E bash -s -- \
     --database-url "mongodb+srv://user:pass@cluster.mongodb.net/platform" \
+    --media-layout separated \
+    --pipeline-mode adaptive \
+    --fanout-max-minutes 30 \
+    --upload-overlap true \
+    --max-parallel-uploads 2 \
     -n 1
 ```
 
@@ -46,6 +51,11 @@ curl -fsSL https://raw.githubusercontent.com/zergolf1994/worker-transcode/main/i
 |---|---|---|
 | `-n, -w, --count` | `1` | จำนวน worker instances; adaptive GPU ควรเริ่ม 1 แล้ว benchmark ก่อนเพิ่มเป็น 2 |
 | `--database-url` | `""` | MongoDB connection string (`DATABASE_URL`) |
+| `--media-layout` | `muxed` | `muxed` หรือ `separated` |
+| `--pipeline-mode` | `adaptive` | `adaptive`, `fanout` หรือ `sequential` |
+| `--fanout-max-minutes` | `30` | threshold ของ adaptive fanout (`1–1440` นาที) |
+| `--upload-overlap` | `true` | encode ตัวถัดไประหว่าง upload (`true`/`false`) |
+| `--max-parallel-uploads` | `2` | จำนวน background uploads (`1–4`) |
 | `--uninstall` | — | ถอนการติดตั้ง |
 
 ```bash
@@ -81,6 +91,65 @@ TRANSCODE_PIPELINE_MODE=adaptive # adaptive | fanout | sequential
 TRANSCODE_FANOUT_MAX_MINUTES=30
 TRANSCODE_UPLOAD_OVERLAP=true
 TRANSCODE_MAX_PARALLEL_UPLOADS=2
+```
+
+### การตั้งค่า Transcode Pipeline
+
+| Environment | Default | ค่าที่รองรับ | ใช้ทำอะไร |
+|---|---:|---|---|
+| `TRANSCODE_PIPELINE_MODE` | `adaptive` | `adaptive`, `fanout`, `sequential` | เลือกวิธีจัดลำดับ encode/upload |
+| `TRANSCODE_FANOUT_MAX_MINUTES` | `30` | `1–1440` นาที | threshold แบ่งไฟล์สั้น/ยาวในโหมด adaptive |
+| `TRANSCODE_UPLOAD_OVERLAP` | `true` | `true`, `false` | ให้ CPU encode ตัวถัดไประหว่าง upload ตัวก่อนหน้า |
+| `TRANSCODE_MAX_PARALLEL_UPLOADS` | `2` | `1–4` | จำกัดจำนวน background uploads ใน sequential/fallback pipeline |
+
+#### `TRANSCODE_PIPELINE_MODE`
+
+- `adaptive` (แนะนำ): GPU + ไฟล์ไม่เกิน threshold จะ decode ครั้งเดียวแล้ว fanout ทุก
+  resolution; ไฟล์ยาวที่มี 720p ขึ้นไปจะ encode/upload 360p ก่อนแล้ว fanout ที่เหลือ;
+  ไฟล์ยาวที่สูงสุดไม่เกิน 480p จะ fanout 360p/480p; CPU encode ทีละ resolution เสมอ
+- `fanout`: GPU decode ครั้งเดียวแล้ว encode ทุก resolution พร้อมกันโดยไม่สนความยาว
+  ถ้าไม่มี GPU หรือ GPU ล้มเหลวจะ fallback เป็น CPU sequential
+- `sequential`: โหมดเดิม `encode → upload → resolution ถัดไป` ไม่ใช้ fanout และไม่
+  เปิด upload overlap เหมาะสำหรับ rollback
+
+#### `TRANSCODE_FANOUT_MAX_MINUTES`
+
+ใช้เฉพาะ `adaptive` โดยค่าที่เท่ากับ threshold ยังถือเป็นไฟล์สั้น เช่น ค่า `30` หมายถึง
+ไฟล์ยาวไม่เกิน 30 นาที fanout ทุก resolution ส่วนไฟล์ที่ยาวกว่า 30 นาทีและมี 720p
+ขึ้นไปจะทำ 360p ให้พร้อมก่อน ค่าแนะนำทั่วไปคือ `30`
+
+#### `TRANSCODE_UPLOAD_OVERLAP`
+
+เมื่อเป็น `true` และ adaptive ต้อง fallback มาใช้ CPU ระบบยังเปิด FFmpeg encode เพียง
+หนึ่งตัว แต่จะ upload output ที่เสร็จแล้วเบื้องหลังพร้อมกับ encode resolution ถัดไป
+ถ้าเป็น `false` จะรอ upload ก่อนเริ่ม encode ตัวถัดไป โหมด explicit `sequential`
+จะไม่ใช้ overlap แม้ตั้งค่านี้เป็น `true`
+
+GPU `priority360` จะ upload 360p พร้อมกับ fanout 480p/720p/1080p ตามการออกแบบของ
+pipeline และจะยังไม่ publish คุณภาพสูงจนกว่า 360p จะสำเร็จ
+
+#### `TRANSCODE_MAX_PARALLEL_UPLOADS`
+
+จำกัดจำนวน output files ที่ upload เบื้องหลังพร้อมกันใน CPU sequential/fallback path
+ค่า `1` ใช้ network/RAM ต่ำสุด, `2` เป็นค่าที่แนะนำ และ `3–4` เหมาะเมื่อ S3/network
+เร็วพอ ค่านี้ต่างจาก `S3_UPLOAD_CONCURRENCY` ซึ่งเป็นจำนวน multipart parts ที่ upload
+พร้อมกัน **ภายในไฟล์เดียว**
+
+ค่าที่แนะนำทั่วไป:
+
+```env
+TRANSCODE_PIPELINE_MODE=adaptive
+TRANSCODE_FANOUT_MAX_MINUTES=30
+TRANSCODE_UPLOAD_OVERLAP=true
+TRANSCODE_MAX_PARALLEL_UPLOADS=2
+```
+
+ค่าสำหรับ rollback กลับไปใช้ flow เดิม:
+
+```env
+TRANSCODE_PIPELINE_MODE=sequential
+TRANSCODE_UPLOAD_OVERLAP=false
+TRANSCODE_MAX_PARALLEL_UPLOADS=1
 ```
 
 ## Settings ใน DB (collection `settings`)
