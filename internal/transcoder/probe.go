@@ -1,6 +1,7 @@
 package transcoder
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -152,9 +153,11 @@ func ProbeVideoInfo(filePath string) (*VideoInfo, error) {
 		"-of", "json",
 		filePath,
 	)
-	output, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = "no diagnostic output"
 		}
